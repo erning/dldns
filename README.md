@@ -7,9 +7,9 @@ corresponding DNS record if it changes.  IPv6 is also supported.
 
 ### Quick start
 
-```
-$ git clone https://github.com/erning/dldns
-$ cd dldns
-$ GOOS=linux GOARCH=mips go build
-$ scp dldns user@router:
+```sh
+git clone https://github.com/erning/dldns
+cd dldns
+GOOS=linux GOARCH=mips64 GOMIPS64=softfloat go build -ldflags "-s -w"
+scp dldns user@router:
 ```

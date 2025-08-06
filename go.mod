@@ -1,16 +1,18 @@
 module github.com/erning/dldns
 
-go 1.17
+go 1.23.0
+
+toolchain go1.24.5
 
 require (
-	github.com/linode/linodego v1.2.1
-	golang.org/x/oauth2 v0.0.0-20211104180415-d3ed0bb246c8
+	github.com/linode/linodego v1.54.0
+	golang.org/x/oauth2 v0.30.0
 )
 
 require (
-	github.com/go-resty/resty/v2 v2.1.1-0.20191201195748-d7b97669fe48 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
-	golang.org/x/net v0.0.0-20210503060351-7fd8e65b6420 // indirect
-	google.golang.org/appengine v1.6.7 // indirect
-	google.golang.org/protobuf v1.27.1 // indirect
+	github.com/go-resty/resty/v2 v2.16.5 // indirect
+	github.com/google/go-querystring v1.1.0 // indirect
+	golang.org/x/net v0.42.0 // indirect
+	golang.org/x/text v0.27.0 // indirect
+	gopkg.in/ini.v1 v1.67.0 // indirect
 )
