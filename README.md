@@ -10,6 +10,7 @@ corresponding DNS record if it changes.  IPv6 is also supported.
 ```sh
 git clone https://github.com/erning/dldns
 cd dldns
-GOOS=linux GOARCH=mips64 GOMIPS64=softfloat go build -ldflags "-s -w"
+CGO_ENABLED=0 GOOS=linux GOARCH=mips64 GOMIPS64=softfloat \
+    go build -ldflags "-s -w"
 scp dldns user@router:
 ```

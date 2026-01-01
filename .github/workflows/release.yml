@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build x86_64
+        run: go build -ldflags "-s -w" -o dldns-amd64
+
+      - name: Build MIPS64 (softfloat)
+        run: GOOS=linux GOARCH=mips64 GOMIPS64=softfloat go build -ldflags "-s -w" -o dldns-mips64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dldns-amd64
+            dldns-mips64
+          generate_release_notes: true

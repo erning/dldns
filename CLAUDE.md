@@ -24,27 +24,44 @@ This is a Dynamic DNS (DDNS) client specifically designed for Linode DNS. The pr
 ### Core Components
 
 - **main.go**: Entry point with command-line interface and IP detection logic
-  - Command-line flags for Linode token, domain ID, IPv4/IPv6 selection
+  - Command-line flags: `-token`, `-domain`, `-4` (IPv4), `-6` (IPv6), `-v` (verbose)
+  - Positional argument for the record name (subdomain)
   - Outbound IP detection via UDP connections to DNS servers
-  - Record comparison and update orchestration
+  - DNS lookup comparison to skip unnecessary updates
+  - Update orchestration for both IPv4 and IPv6
 
 - **linode.go**: Linode API integration
   - OAuth2 authentication with Linode API
+  - Domain name retrieval from domain ID
   - Domain record management (create, update, delete)
   - Conflict resolution with CNAME records
-  - Duplicate record cleanup
+  - Duplicate A/AAAA record cleanup
+
+### Usage
+
+```bash
+./dldns -token <linode-api-token> -domain <domain-id> -4 -6 [-v] <record-name>
+```
+
+- `-token`: Linode API token (required)
+- `-domain`: Linode domain ID (required)
+- `-4`: Enable IPv4 update (at least one of `-4` or `-6` is required)
+- `-6`: Enable IPv6 update (at least one of `-4` or `-6` is required)
+- `-v`: Verbose mode (shows skipped updates)
+- `<record-name>`: Subdomain name to update (required, positional argument)
 
 ### Key Design Patterns
 
 1. **Outbound IP Detection**: Uses UDP connections to public DNS servers (114.114.114.114:53 for IPv4, 2400:3200:baba::1:53 for IPv6) to determine the router's external IP
 
-2. **Smart Record Management**: 
+2. **Smart Record Management**:
+   - First performs a DNS lookup to check if current IP matches existing record
    - Automatically removes conflicting CNAME records
    - Cleans up duplicate A/AAAA records
    - Updates existing records when IP changes
-   - Only creates new records when none exist
+   - Creates new records when none exist
 
-3. **Efficient Updates**: Skips API calls when current IP matches DNS record
+3. **Efficient Updates**: Skips API calls when current IP matches DNS record (checked via DNS lookup before API call)
 
 ### Configuration
 
