@@ -26,10 +26,14 @@ jobs:
       - name: Build MIPS64 (softfloat)
         run: GOOS=linux GOARCH=mips64 GOMIPS64=softfloat go build -ldflags "-s -w" -o dldns-mips64
 
+      - name: Build ARM64
+        run: GOOS=linux GOARCH=arm64 go build -ldflags "-s -w" -o dldns-arm64
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dldns-amd64
             dldns-mips64
+            dldns-arm64
           generate_release_notes: true
