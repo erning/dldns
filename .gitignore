@@ -1,0 +1,12 @@
+# Build output
+dldns
+dldns-*
+
+# Go
+.go/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
