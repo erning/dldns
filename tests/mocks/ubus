@@ -1,0 +1,22 @@
+#!/bin/sh
+
+[ "$1" = call ] || exit 1
+
+case "$2:$3" in
+	network.interface:dump)
+		printf '%s\n' '{"interface":[{"interface":"loopback","proto":"static"},{"interface":"pppoe1","proto":"pppoe"},{"interface":"pppoe2","proto":"pppoe"}]}'
+		;;
+	network.interface.pppoe1:status)
+		printf '%s\n' '{"up":true,"proto":"pppoe","l3_device":"pppoe-pppoe1","ipv4-address":[{"address":"100.100.135.196"}],"ipv6-address":[]}'
+		;;
+	network.interface.pppoe1_6:status)
+		printf '%s\n' '{"up":true,"proto":"dhcpv6","l3_device":"pppoe-pppoe1","ipv4-address":[],"ipv6-address":[{"address":"2409:8a1e:8f01:2a3c::1"}]}'
+		;;
+	network.interface.pppoe2:status)
+		printf '%s\n' '{"up":true,"proto":"pppoe","l3_device":"pppoe-pppoe2","ipv4-address":[{"address":"116.237.37.232"}],"ipv6-address":[]}'
+		;;
+	network.interface.pppoe2_6:status)
+		printf '%s\n' '{"up":true,"proto":"dhcpv6","l3_device":"pppoe-pppoe2","ipv4-address":[],"ipv6-address":[{"address":"240e:b8f:9b00:8a22::1"},{"address":"240e:b8f:9b00:8a22::2"}]}'
+		;;
+	*) exit 1 ;;
+esac

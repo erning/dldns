@@ -1,0 +1,1506 @@
+#!/bin/sh
+
+# Dynamic DNS helper for OpenWrt.
+# No command changes UCI, netifd, routes, cron, or local router state.
+
+PROGRAM_NAME=$(basename "$0")
+PROGRAM_VERSION=0.4.0
+
+UBUS_CMD=$DLDNS_UBUS
+[ -n "$UBUS_CMD" ] || UBUS_CMD=ubus
+JSONFILTER_CMD=$DLDNS_JSONFILTER
+[ -n "$JSONFILTER_CMD" ] || JSONFILTER_CMD=jsonfilter
+CURL_CMD=$DLDNS_CURL
+[ -n "$CURL_CMD" ] || CURL_CMD=curl
+JSHN_LIB=$DLDNS_JSHN_LIB
+[ -n "$JSHN_LIB" ] || JSHN_LIB=/usr/share/libubox/jshn.sh
+UCI_FUNCTIONS_LIB=$DLDNS_UCI_FUNCTIONS_LIB
+[ -n "$UCI_FUNCTIONS_LIB" ] || UCI_FUNCTIONS_LIB=/lib/functions.sh
+
+error()
+{
+	printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+}
+
+sync_verbose()
+{
+	[ "${SYNC_VERBOSE:-0}" -eq 1 ] || return 0
+	printf '%s: %s\n' "$PROGRAM_NAME" "$*"
+}
+
+usage_error()
+{
+	error "$*"
+	case "${COMMAND:-}" in
+		ip|update|sync)
+			printf "Try '%s %s --help' for more information.\n" "$PROGRAM_NAME" "$COMMAND" >&2
+			;;
+		*)
+			printf "Try '%s --help' for more information.\n" "$PROGRAM_NAME" >&2
+			;;
+	esac
+	exit 2
+}
+
+show_main_help()
+{
+	cat <<EOF
+Usage: $PROGRAM_NAME COMMAND [options]
+
+Commands:
+  ip       Show current interface addresses (read-only)
+  update   Reconcile one Linode A and/or AAAA record
+  sync     Discover interface addresses and synchronize configured records
+
+Run '$PROGRAM_NAME COMMAND --help' for command-specific help.
+EOF
+}
+
+show_ip_help()
+{
+	cat <<EOF
+Usage:
+  $PROGRAM_NAME ip [options] [INTERFACE...]
+
+Read the current IPv4 and IPv6 addresses of OpenWrt network interfaces.
+With no INTERFACE argument, all interfaces using proto=pppoe are discovered.
+A PPPoE interface and its generated _6 interface are shown as one WAN.
+
+Options:
+  -4, --ipv4             Show IPv4 only
+  -6, --ipv6             Show IPv6 only
+      --external         Query externally visible addresses (read-only)
+      --probe-url URL    Plain-text IP echo endpoint used by --external
+  -o, --format FORMAT    Output: table (default), json, or value
+  -q, --quiet            Suppress diagnostic messages
+  -h, --help             Show this help
+
+Examples:
+  $PROGRAM_NAME ip
+  $PROGRAM_NAME ip pppoe1 pppoe2
+  $PROGRAM_NAME ip -4 --format value pppoe2
+  $PROGRAM_NAME ip --external --probe-url https://example.net/ip pppoe1
+
+The ip command never changes network configuration, routes, DNS records,
+cron jobs, or files on the router.
+EOF
+}
+
+show_update_help()
+{
+	cat <<EOF
+Usage:
+  $PROGRAM_NAME update --domain-id ID --token-file FILE [options] RECORD
+
+Set the A and/or AAAA records for one Linode DNS record name to the exact IP
+address lists given on the command line. Address options may be repeated.
+An address family that is not specified is left unchanged.
+
+Required:
+      --domain-id ID      Linode domain ID
+      --token-file FILE   File containing the API token
+  -4, --ipv4 ADDRESS      Desired IPv4 address; may be repeated
+  -6, --ipv6 ADDRESS      Desired IPv6 address; may be repeated
+
+Options:
+      --clear-ipv4        Delete all A records for RECORD
+      --clear-ipv6        Delete all AAAA records for RECORD
+      --ttl SECONDS       Record TTL (default: 300)
+  -h, --help              Show this help
+
+Examples:
+  $PROGRAM_NAME update --domain-id 123 --token-file /root/linode.token -4 192.0.2.10 host
+  $PROGRAM_NAME update --domain-id 123 --token-file /root/linode.token -6 2001:db8::10 -6 2001:db8::11 host
+  $PROGRAM_NAME update --domain-id 123 --token-file /root/linode.token --clear-ipv6 host
+
+For each specified family, matching records are kept, missing records are
+created, and stale or duplicate records are updated or deleted. Same-name
+CNAME records are removed when new A or AAAA records are requested. A clear
+option and address options for the same family cannot be used together.
+EOF
+}
+
+show_sync_help()
+{
+	cat <<EOF
+Usage:
+  $PROGRAM_NAME sync [-v|--verbose] [INTERFACE...]
+
+Discover public addresses on selected OpenWrt interfaces and synchronize the
+Linode records configured in /etc/config/dldns. Command-line interfaces take
+precedence over configured interfaces. If neither is present, all interfaces
+using proto=pppoe are discovered.
+
+Options:
+  -v, --verbose           Show interfaces, addresses, plans, API requests, and unchanged records
+  -h, --help              Show this help
+
+Configuration example:
+  config dldns 'main'
+          option domain_id '12345'
+          option token '@/root/linode.token'
+          option ttl '300'
+          list interface 'pppoe1'
+          list record 'soda 4 6'
+          list record 'soda-v4 4'
+          list record 'soda-v6 6'
+EOF
+}
+
+require_command()
+{
+	command -v "$1" >/dev/null 2>&1 || {
+		error "required command not found: $1"
+		return 1
+	}
+}
+
+json_values()
+{
+	local document expression
+	document=$1
+	expression=$2
+	printf '%s' "$document" |
+		"$JSONFILTER_CMD" -e "$expression" 2>/dev/null
+}
+
+normalize_lines()
+{
+	awk 'NF && !seen[$0]++ { print }'
+}
+
+line_count()
+{
+	printf '%s\n' "$1" | awk 'NF { n++ } END { print n + 0 }'
+}
+
+join_lines()
+{
+	printf '%s\n' "$1" |
+		awk 'NF { if (s == "") s = $0; else s = s "," $0 } END { print s }'
+}
+
+valid_interface_name()
+{
+	case "$1" in
+		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+valid_ipv4()
+{
+	local old_ifs octet
+	old_ifs=$IFS
+	IFS=.
+	# Intentional field splitting on IPv4 octets.
+	# shellcheck disable=SC2086
+	set -- $1
+	IFS=$old_ifs
+	[ "$#" -eq 4 ] || return 1
+	for octet in "$@"; do
+		case "$octet" in
+			''|*[!0-9]*) return 1 ;;
+		esac
+		[ "$octet" -le 255 ] 2>/dev/null || return 1
+	done
+}
+
+valid_ipv6()
+{
+	local address
+	address=$1
+	case "$address" in
+		''|*[!0-9A-Fa-f:]*|*:::*) return 1 ;;
+		:*) case "$address" in ::*) ;; *) return 1 ;; esac ;;
+	esac
+	case "$address" in
+		*:) case "$address" in *::) ;; *) return 1 ;; esac ;;
+	esac
+	printf '%s\n' "$address" |
+		awk '
+		{
+			compressed = index($0, "::") > 0
+			rest = $0
+			if (compressed) {
+				sub(/::/, "", rest)
+				if (index(rest, "::") > 0)
+					exit 1
+			}
+			n = split($0, part, ":")
+			groups = 0
+			for (i = 1; i <= n; i++) {
+				if (length(part[i]) > 4)
+					exit 1
+				if (part[i] != "")
+					groups++
+			}
+			if (compressed && groups < 8)
+				exit 0
+			if (!compressed && groups == 8)
+				exit 0
+			exit 1
+		}'
+}
+
+ipv4_scope()
+{
+	local old_ifs a b c
+	valid_ipv4 "$1" || {
+		printf '%s\n' invalid
+		return
+	}
+	old_ifs=$IFS
+	IFS=.
+	# Intentional field splitting on IPv4 octets.
+	# shellcheck disable=SC2086
+	set -- $1
+	IFS=$old_ifs
+	a=$1
+	b=$2
+	c=$3
+
+	if [ "$a" -eq 0 ]; then
+		printf '%s\n' reserved
+	elif [ "$a" -eq 10 ]; then
+		printf '%s\n' private
+	elif [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ]; then
+		printf '%s\n' cgnat
+	elif [ "$a" -eq 127 ]; then
+		printf '%s\n' loopback
+	elif [ "$a" -eq 169 ] && [ "$b" -eq 254 ]; then
+		printf '%s\n' link-local
+	elif [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ]; then
+		printf '%s\n' private
+	elif [ "$a" -eq 192 ] && [ "$b" -eq 168 ]; then
+		printf '%s\n' private
+	elif [ "$a" -eq 192 ] && [ "$b" -eq 0 ] && [ "$c" -eq 0 ]; then
+		printf '%s\n' reserved
+	elif [ "$a" -eq 192 ] && [ "$b" -eq 0 ] && [ "$c" -eq 2 ]; then
+		printf '%s\n' documentation
+	elif [ "$a" -eq 198 ] && { [ "$b" -eq 18 ] || [ "$b" -eq 19 ]; }; then
+		printf '%s\n' benchmark
+	elif [ "$a" -eq 198 ] && [ "$b" -eq 51 ] && [ "$c" -eq 100 ]; then
+		printf '%s\n' documentation
+	elif [ "$a" -eq 203 ] && [ "$b" -eq 0 ] && [ "$c" -eq 113 ]; then
+		printf '%s\n' documentation
+	elif [ "$a" -ge 224 ] && [ "$a" -le 239 ]; then
+		printf '%s\n' multicast
+	elif [ "$a" -ge 240 ]; then
+		printf '%s\n' reserved
+	else
+		printf '%s\n' public
+	fi
+}
+
+ipv4_scope_for_list()
+{
+	local scopes
+	scopes=$(
+		printf '%s\n' "$1" |
+		while IFS= read -r ip; do
+			[ -n "$ip" ] && ipv4_scope "$ip"
+		done |
+		normalize_lines
+	)
+	case "$(line_count "$scopes")" in
+		0) printf '%s\n' none ;;
+		1) printf '%s\n' "$scopes" ;;
+		*) printf '%s\n' mixed ;;
+	esac
+}
+
+public_ipv6()
+{
+	local address
+	address=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+	case "$address" in
+		2*|3*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+filter_public_ipv6()
+{
+	while IFS= read -r address; do
+		[ -n "$address" ] || continue
+		public_ipv6 "$address" && printf '%s\n' "$address"
+	done
+}
+
+canonical_interface_name()
+{
+	local requested base status proto
+	requested=$1
+	case "$requested" in
+		*_6)
+			base=$(printf '%s' "$requested" | sed 's/_6$//')
+			if status=$("$UBUS_CMD" call "network.interface.$base" status 2>/dev/null); then
+				proto=$(json_values "$status" '@.proto')
+				if [ "$proto" = pppoe ]; then
+					printf '%s\n' "$base"
+					return
+				fi
+			fi
+			;;
+	esac
+	printf '%s\n' "$requested"
+}
+
+load_interface_snapshot()
+{
+	local interface child_interface parent_ipv6 child_ipv6 child_status
+	interface=$1
+
+	STATUS=$("$UBUS_CMD" call "network.interface.$interface" status 2>/dev/null) ||
+		return 1
+
+	UP=$(json_values "$STATUS" '@.up')
+	DEVICE=$(json_values "$STATUS" '@.l3_device')
+	[ "$UP" = true ] && STATE=up || STATE=down
+
+	IPV4=$(json_values "$STATUS" '@["ipv4-address"][*].address' |
+		normalize_lines)
+	IPV4_SCOPE=$(ipv4_scope_for_list "$IPV4")
+
+	parent_ipv6=$(json_values "$STATUS" '@["ipv6-address"][*].address')
+	child_ipv6=
+	child_interface=$interface"_6"
+	if child_status=$("$UBUS_CMD" call "network.interface.$child_interface" status 2>/dev/null); then
+		child_ipv6=$(json_values "$child_status" '@["ipv6-address"][*].address')
+	fi
+	IPV6=$(
+		{
+			printf '%s\n' "$parent_ipv6"
+			printf '%s\n' "$child_ipv6"
+		} |
+		filter_public_ipv6 |
+		normalize_lines
+	)
+}
+
+probe_external_ip()
+{
+	local family device url result
+	family=$1
+	device=$2
+	url=$3
+	result=$(
+		"$CURL_CMD" "-$family" --interface "$device" --fail --silent --show-error --connect-timeout 5 --max-time 15 "$url" 2>/dev/null
+	) || return 1
+	result=$(printf '%s' "$result" | tr -d '\r\n')
+
+	case "$family" in
+		4) [ "$(ipv4_scope "$result")" = public ] || return 1 ;;
+		6) public_ipv6 "$result" || return 1 ;;
+		*) return 1 ;;
+	esac
+	printf '%s\n' "$result"
+}
+
+json_add_array_values()
+{
+	local old_ifs value
+	old_ifs=$IFS
+	IFS='
+'
+	for value in $1; do
+		[ -n "$value" ] && json_add_string "" "$value"
+	done
+	IFS=$old_ifs
+}
+
+json_add_family()
+{
+	local name addresses scope include_external external
+	name=$1
+	addresses=$2
+	scope=$3
+	include_external=$4
+	external=$5
+
+	json_add_object "$name"
+	json_add_array assigned
+	json_add_array_values "$addresses"
+	json_close_array
+	if [ "$scope" = none ]; then
+		json_add_null scope
+	else
+		json_add_string scope "$scope"
+	fi
+	if [ "$include_external" -eq 1 ]; then
+		if [ -n "$external" ]; then
+			json_add_string external "$external"
+		else
+			json_add_null external
+		fi
+	fi
+	json_close_object
+}
+
+print_table_header()
+{
+	if [ "$SHOW_IPV4" -eq 1 ] && [ "$SHOW_IPV6" -eq 1 ]; then
+		if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+			printf '%-11s %-5s %-20s %-18s %-11s %-18s %s\n' INTERFACE STATE DEVICE IPV4 IPV4-SCOPE EXTERNAL-IPV4 IPV6
+		else
+			printf '%-11s %-5s %-20s %-18s %-11s %s\n' INTERFACE STATE DEVICE IPV4 IPV4-SCOPE IPV6
+		fi
+	elif [ "$SHOW_IPV4" -eq 1 ]; then
+		if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+			printf '%-11s %-5s %-20s %-18s %-11s %s\n' INTERFACE STATE DEVICE IPV4 IPV4-SCOPE EXTERNAL-IPV4
+		else
+			printf '%-11s %-5s %-20s %-18s %s\n' INTERFACE STATE DEVICE IPV4 IPV4-SCOPE
+		fi
+	else
+		if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+			printf '%-11s %-5s %-20s %-42s %s\n' INTERFACE STATE DEVICE IPV6 EXTERNAL-IPV6
+		else
+			printf '%-11s %-5s %-20s %s\n' INTERFACE STATE DEVICE IPV6
+		fi
+	fi
+}
+
+dash_if_empty()
+{
+	[ -n "$1" ] && printf '%s' "$1" || printf '%s' -
+}
+
+print_table_row()
+{
+	local interface state device ipv4 scope ipv6 external4 external6
+	interface=$1
+	state=$2
+	device=$(dash_if_empty "$3")
+	ipv4=$(dash_if_empty "$4")
+	scope=$(dash_if_empty "$5")
+	ipv6=$(dash_if_empty "$6")
+	external4=$(dash_if_empty "$7")
+	external6=$(dash_if_empty "$8")
+	[ "$scope" != none ] || scope=-
+
+	if [ "$SHOW_IPV4" -eq 1 ] && [ "$SHOW_IPV6" -eq 1 ]; then
+		if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+			printf '%-11s %-5s %-20s %-18s %-11s %-18s %s\n' "$interface" "$state" "$device" "$ipv4" "$scope" "$external4" "$ipv6"
+		else
+			printf '%-11s %-5s %-20s %-18s %-11s %s\n' "$interface" "$state" "$device" "$ipv4" "$scope" "$ipv6"
+		fi
+	elif [ "$SHOW_IPV4" -eq 1 ]; then
+		if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+			printf '%-11s %-5s %-20s %-18s %-11s %s\n' "$interface" "$state" "$device" "$ipv4" "$scope" "$external4"
+		else
+			printf '%-11s %-5s %-20s %-18s %s\n' "$interface" "$state" "$device" "$ipv4" "$scope"
+		fi
+	else
+		if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+			printf '%-11s %-5s %-20s %-42s %s\n' "$interface" "$state" "$device" "$ipv6" "$external6"
+		else
+			printf '%-11s %-5s %-20s %s\n' "$interface" "$state" "$device" "$ipv6"
+		fi
+	fi
+}
+
+positive_integer()
+{
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -gt 0 ] 2>/dev/null
+}
+
+valid_record_ttl()
+{
+	case "$1" in
+		300|3600|7200|14400|28800|57600|86400|172800|345600|604800|1209600|2419200)
+			return 0
+			;;
+		*) return 1 ;;
+	esac
+}
+
+valid_record_name()
+{
+	case "$1" in
+		''|*[!A-Za-z0-9._*-]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+sync_record_name_seen()
+{
+	case "
+$SYNC_RECORD_NAMES
+" in
+		*"
+$1
+"*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+append_sync_interface()
+{
+	if ! valid_interface_name "$1"; then
+		error "invalid interface in dldns.main: $1"
+		SYNC_CONFIG_ERROR=1
+		return
+	fi
+	SYNC_CONFIG_INTERFACES="$SYNC_CONFIG_INTERFACES
+$1"
+}
+
+append_sync_record()
+{
+	local entry name family has4 has6 canonical old_ifs
+	entry=$1
+	old_ifs=$IFS
+	IFS='
+	 '
+	set -f
+	# Intentional field splitting of: RECORD 4 [6]
+	# shellcheck disable=SC2086
+	set -- $entry
+	set +f
+	IFS=$old_ifs
+	if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+		error "invalid record entry: $entry"
+		SYNC_CONFIG_ERROR=1
+		return
+	fi
+	name=$1
+	shift
+	if ! valid_record_name "$name"; then
+		error "invalid record name in dldns.main: $name"
+		SYNC_CONFIG_ERROR=1
+		return
+	fi
+	if sync_record_name_seen "$name"; then
+		error "duplicate record entry in dldns.main: $name"
+		SYNC_CONFIG_ERROR=1
+		return
+	fi
+
+	has4=0
+	has6=0
+	for family in "$@"; do
+		case "$family" in
+			4)
+				[ "$has4" -eq 0 ] || {
+					error "duplicate address family in record entry: $entry"
+					SYNC_CONFIG_ERROR=1
+					return
+				}
+				has4=1
+				;;
+			6)
+				[ "$has6" -eq 0 ] || {
+					error "duplicate address family in record entry: $entry"
+					SYNC_CONFIG_ERROR=1
+					return
+				}
+				has6=1
+				;;
+			*)
+				error "unsupported address family in record entry: $entry"
+				SYNC_CONFIG_ERROR=1
+				return
+				;;
+		esac
+	done
+
+	canonical=$name:
+	if [ "$has4" -eq 1 ]; then
+		canonical=${canonical}4
+		SYNC_NEEDS_IPV4=1
+	fi
+	if [ "$has6" -eq 1 ]; then
+		canonical=${canonical}6
+		SYNC_NEEDS_IPV6=1
+	fi
+	SYNC_RECORDS="$SYNC_RECORDS
+$canonical"
+	SYNC_RECORD_NAMES="$SYNC_RECORD_NAMES
+$name"
+}
+
+load_sync_token()
+{
+	local configured path
+	configured=$1
+	[ -n "$configured" ] || {
+		error 'option token is required in dldns.main'
+		return 1
+	}
+	case "$configured" in
+		@*)
+			path=${configured#@}
+			case "$path" in
+				/*) ;;
+				*)
+					error 'token file path after @ must be absolute'
+					return 1
+					;;
+			esac
+			[ -r "$path" ] || {
+				error "unable to read Linode token file: $path"
+				return 1
+			}
+			LINODE_TOKEN=$(sed -n '1p' "$path" | tr -d '\r\n')
+			;;
+		*) LINODE_TOKEN=$configured ;;
+	esac
+	[ -n "$LINODE_TOKEN" ] || {
+		error 'Linode token is empty'
+		return 1
+	}
+	case "$LINODE_TOKEN" in
+		*[!A-Za-z0-9._~-]*)
+			error 'Linode token contains unsupported characters'
+			return 1
+			;;
+	esac
+}
+
+load_linode_token()
+{
+	[ -r "$UPDATE_TOKEN_FILE" ] || {
+		error "unable to read Linode token file: $UPDATE_TOKEN_FILE"
+		return 1
+	}
+	LINODE_TOKEN=$(sed -n '1p' "$UPDATE_TOKEN_FILE" | tr -d '\r\n')
+	[ -n "$LINODE_TOKEN" ] || {
+		error "Linode token file is empty: $UPDATE_TOKEN_FILE"
+		return 1
+	}
+	case "$LINODE_TOKEN" in
+		*[!A-Za-z0-9._~-]*)
+			error 'Linode token contains unsupported characters'
+			return 1
+			;;
+	esac
+}
+
+linode_auth_config()
+{
+	printf 'header = "Authorization: Bearer %s"\n' "$LINODE_TOKEN"
+	printf '%s\n' 'header = "Accept: application/json"'
+	printf '%s\n' 'header = "Content-Type: application/json"'
+}
+
+linode_request()
+{
+	local method path body filter response request_status reasons
+	method=$1
+	path=$2
+	body=$3
+	filter=$4
+
+	set -- --config - --silent --show-error --connect-timeout 5 --max-time 20 --request "$method" --write-out '\n%{http_code}'
+	[ -n "$body" ] && set -- "$@" --data "$body"
+	[ -n "$filter" ] && set -- "$@" --header "X-Filter: $filter"
+	set -- "$@" "$LINODE_API_URL$path"
+
+	response=$(linode_auth_config | "$CURL_CMD" "$@")
+	request_status=$?
+	LINODE_HTTP_CODE=$(printf '%s\n' "$response" | tail -n 1)
+	LINODE_BODY=$(printf '%s\n' "$response" | sed '$d')
+
+	if [ "$request_status" -ne 0 ]; then
+		error "Linode API request failed: $method $path"
+		return 1
+	fi
+	if [ "${SYNC_MODE:-0}" -eq 1 ]; then
+		sync_verbose "Linode API $method $path -> HTTP $LINODE_HTTP_CODE"
+	fi
+	case "$LINODE_HTTP_CODE" in
+		2??) return 0 ;;
+	esac
+
+	reasons=$(json_values "$LINODE_BODY" '@.errors[*].reason' | join_lines)
+	[ -n "$reasons" ] || reasons='unknown API error'
+	error "Linode API returned HTTP $LINODE_HTTP_CODE: $reasons"
+	return 1
+}
+
+append_sync_event()
+{
+	local action type old_value new_value old_report new_report
+	action=$1
+	type=$2
+	old_value=$3
+	new_value=$4
+	old_report=$old_value
+	new_report=$new_value
+	[ -n "$old_report" ] || old_report=-
+	[ -n "$new_report" ] || new_report=-
+	SYNC_CHANGE_COUNT=$((SYNC_CHANGE_COUNT + 1))
+	if [ -z "$SYNC_EVENT_REPORT" ]; then
+		SYNC_EVENT_REPORT="$action $type $UPDATE_RECORD $old_report $new_report"
+	else
+		SYNC_EVENT_REPORT="$SYNC_EVENT_REPORT
+$action $type $UPDATE_RECORD $old_report $new_report"
+	fi
+}
+
+emit_update_change()
+{
+	local action type id old_value new_value detail
+	action=$1
+	type=$2
+	id=$3
+	old_value=$4
+	new_value=$5
+	detail=$6
+	if [ "${SYNC_MODE:-0}" -eq 1 ]; then
+		case "$action" in
+			created|updated|deleted)
+				append_sync_event "$action" "$type" "$old_value" "$new_value"
+				;;
+		esac
+		if [ "$action" = unchanged ] && [ "$SYNC_VERBOSE" -ne 1 ]; then
+			return
+		fi
+	fi
+	case "$action" in
+		unchanged)
+			printf '%-13s %-5s %-24s %s\n' "$action" "$type" "$UPDATE_RECORD" "$new_value"
+			;;
+		created)
+			printf '%-13s %-5s %-24s %s\n' "$action" "$type" "$UPDATE_RECORD" "$new_value"
+			;;
+		updated)
+			printf '%-13s %-5s %-24s %s -> %s\n' "$action" "$type" "$UPDATE_RECORD" "$old_value" "$new_value"
+			;;
+		deleted)
+			printf '%-13s %-5s %-24s %s (id=%s, %s)\n' "$action" "$type" "$UPDATE_RECORD" "$old_value" "$id" "$detail"
+			;;
+	esac
+}
+
+record_ids_by_type()
+{
+	json_values "$RECORDS_JSON" "@.data[@.type=\"$1\"].id"
+}
+
+record_ids_by_type_target()
+{
+	json_values "$RECORDS_JSON" "@.data[@.type=\"$1\" && @.target=\"$2\"].id"
+}
+
+record_field_by_id()
+{
+	json_values "$RECORDS_JSON" "@.data[@.id=$1].$2"
+}
+
+exact_record_ids()
+{
+	json_values "$RECORDS_JSON" "@.data[@.type=\"$1\" && @.target=\"$2\" && @.ttl_sec=$UPDATE_TTL].id"
+}
+
+delete_record()
+{
+	local id type target detail
+	id=$1
+	type=$2
+	detail=$3
+	target=$(record_field_by_id "$id" target)
+
+	linode_request DELETE "/domains/$UPDATE_DOMAIN_ID/records/$id" "" "" ||
+		return 1
+	emit_update_change deleted "$type" "$id" "$target" "" "$detail"
+}
+
+id_is_used()
+{
+	case "
+$USED_IDS
+" in
+		*"
+$1
+"*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+first_unused_id()
+{
+	local candidate
+	for candidate in $1; do
+		if ! id_is_used "$candidate"; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+mark_id_used()
+{
+	if [ -z "$USED_IDS" ]; then
+		USED_IDS=$1
+	else
+		USED_IDS="$USED_IDS
+$1"
+	fi
+}
+
+reconcile_record_type()
+{
+	local type targets ids target exact_ids target_ids kept_id id old_target body response_id
+	type=$1
+	targets=$2
+	ids=$(record_ids_by_type "$type")
+	USED_IDS=
+
+	for target in $targets; do
+		exact_ids=$(exact_record_ids "$type" "$target")
+		kept_id=$(first_unused_id "$exact_ids") || kept_id=
+		if [ -n "$kept_id" ]; then
+			mark_id_used "$kept_id"
+			emit_update_change unchanged "$type" "$kept_id" "$target" "$target" ""
+			continue
+		fi
+
+		target_ids=$(record_ids_by_type_target "$type" "$target")
+		kept_id=$(first_unused_id "$target_ids") || kept_id=
+		[ -n "$kept_id" ] || kept_id=$(first_unused_id "$ids") || kept_id=
+		if [ -n "$kept_id" ]; then
+			mark_id_used "$kept_id"
+			old_target=$(record_field_by_id "$kept_id" target)
+			body=$(printf '{"name":"%s","target":"%s","ttl_sec":%s}' "$UPDATE_RECORD" "$target" "$UPDATE_TTL")
+			linode_request PUT "/domains/$UPDATE_DOMAIN_ID/records/$kept_id" "$body" "" ||
+				return 1
+			emit_update_change updated "$type" "$kept_id" "$old_target" "$target" ""
+			continue
+		fi
+
+		body=$(printf '{"type":"%s","name":"%s","target":"%s","ttl_sec":%s}' "$type" "$UPDATE_RECORD" "$target" "$UPDATE_TTL")
+		linode_request POST "/domains/$UPDATE_DOMAIN_ID/records" "$body" "" ||
+			return 1
+		response_id=$(json_values "$LINODE_BODY" '@.id')
+		emit_update_change created "$type" "$response_id" "" "$target" ""
+	done
+
+	for id in $ids; do
+		id_is_used "$id" && continue
+		delete_record "$id" "$type" 'surplus record' || return 1
+	done
+}
+
+run_update()
+{
+	UPDATE_DOMAIN_ID=
+	UPDATE_TOKEN_FILE=
+	UPDATE_TARGET_IPV4=
+	UPDATE_TARGET_IPV6=
+	UPDATE_IPV4_SELECTED=0
+	UPDATE_IPV6_SELECTED=0
+	UPDATE_CLEAR_IPV4=0
+	UPDATE_CLEAR_IPV6=0
+	UPDATE_TTL=300
+	UPDATE_RECORD=
+	LINODE_API_URL=$DLDNS_LINODE_API_URL
+	[ -n "$LINODE_API_URL" ] || LINODE_API_URL=https://api.linode.com/v4
+
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--domain-id)
+				[ "$#" -ge 2 ] || usage_error '--domain-id requires an ID'
+				UPDATE_DOMAIN_ID=$2
+				shift
+				;;
+			--token-file)
+				[ "$#" -ge 2 ] || usage_error '--token-file requires a path'
+				UPDATE_TOKEN_FILE=$2
+				shift
+				;;
+			-4|--ipv4)
+				[ "$#" -ge 2 ] || usage_error "$1 requires an IPv4 address"
+				valid_ipv4 "$2" || usage_error "invalid IPv4 address: $2"
+				UPDATE_IPV4_SELECTED=1
+				UPDATE_TARGET_IPV4="$UPDATE_TARGET_IPV4
+$2"
+				shift
+				;;
+			-6|--ipv6)
+				[ "$#" -ge 2 ] || usage_error "$1 requires an IPv6 address"
+				valid_ipv6 "$2" || usage_error "invalid IPv6 address: $2"
+				UPDATE_IPV6_SELECTED=1
+				UPDATE_TARGET_IPV6="$UPDATE_TARGET_IPV6
+$2"
+				shift
+				;;
+			--clear-ipv4)
+				UPDATE_IPV4_SELECTED=1
+				UPDATE_CLEAR_IPV4=1
+				;;
+			--clear-ipv6)
+				UPDATE_IPV6_SELECTED=1
+				UPDATE_CLEAR_IPV6=1
+				;;
+			--ttl)
+				[ "$#" -ge 2 ] || usage_error '--ttl requires seconds'
+				UPDATE_TTL=$2
+				shift
+				;;
+			-h|--help)
+				show_update_help
+				exit 0
+				;;
+			-*) usage_error "unknown option: $1" ;;
+			*)
+				[ -z "$UPDATE_RECORD" ] || usage_error 'update accepts exactly one RECORD'
+				UPDATE_RECORD=$1
+				;;
+		esac
+		shift
+	done
+
+	positive_integer "$UPDATE_DOMAIN_ID" || usage_error '--domain-id must be a positive integer'
+	[ -n "$UPDATE_TOKEN_FILE" ] || usage_error '--token-file is required'
+	valid_record_name "$UPDATE_RECORD" || usage_error 'RECORD contains unsupported characters'
+	UPDATE_TARGET_IPV4=$(printf '%s\n' "$UPDATE_TARGET_IPV4" | normalize_lines)
+	UPDATE_TARGET_IPV6=$(printf '%s\n' "$UPDATE_TARGET_IPV6" | tr 'A-F' 'a-f' | normalize_lines)
+	[ "$UPDATE_IPV4_SELECTED" -eq 1 ] || [ "$UPDATE_IPV6_SELECTED" -eq 1 ] ||
+		usage_error 'at least one address or clear option is required'
+	if [ "$UPDATE_CLEAR_IPV4" -eq 1 ] && [ -n "$UPDATE_TARGET_IPV4" ]; then
+		usage_error '--clear-ipv4 cannot be combined with --ipv4/-4'
+	fi
+	if [ "$UPDATE_CLEAR_IPV6" -eq 1 ] && [ -n "$UPDATE_TARGET_IPV6" ]; then
+		usage_error '--clear-ipv6 cannot be combined with --ipv6/-6'
+	fi
+	valid_record_ttl "$UPDATE_TTL" || usage_error 'unsupported TTL; minimum and default is 300'
+
+	require_command "$JSONFILTER_CMD" || return 1
+	require_command "$CURL_CMD" || return 1
+	load_linode_token || return 1
+
+	filter=$(printf '{"name":"%s"}' "$UPDATE_RECORD")
+	linode_request GET "/domains/$UPDATE_DOMAIN_ID/records?page_size=500" "" "$filter" ||
+		return 1
+	RECORDS_JSON=$LINODE_BODY
+	pages=$(json_values "$RECORDS_JSON" '@.pages')
+	[ -z "$pages" ] || [ "$pages" -eq 1 ] || {
+		error "Linode returned $pages pages for record name $UPDATE_RECORD"
+		return 1
+	}
+
+	CNAME_IDS=$(record_ids_by_type CNAME)
+	if { [ -n "$UPDATE_TARGET_IPV4" ] || [ -n "$UPDATE_TARGET_IPV6" ]; } && [ -n "$CNAME_IDS" ]; then
+		for id in $CNAME_IDS; do
+			delete_record "$id" CNAME 'conflicting CNAME' || return 1
+		done
+	fi
+
+	RESULT=0
+	if [ "$UPDATE_IPV4_SELECTED" -eq 1 ]; then
+		reconcile_record_type A "$UPDATE_TARGET_IPV4" || RESULT=$?
+	fi
+	if [ "$RESULT" -eq 0 ] && [ "$UPDATE_IPV6_SELECTED" -eq 1 ]; then
+		reconcile_record_type AAAA "$UPDATE_TARGET_IPV6" || RESULT=$?
+	fi
+	return "$RESULT"
+}
+
+load_sync_config()
+{
+	local configured_token
+	[ -r "$UCI_FUNCTIONS_LIB" ] || {
+		error "required UCI library not found: $UCI_FUNCTIONS_LIB"
+		return 1
+	}
+	# shellcheck source=/dev/null
+	. "$UCI_FUNCTIONS_LIB"
+	config_load dldns || {
+		error 'unable to load /etc/config/dldns'
+		return 1
+	}
+
+	SYNC_CONFIG_INTERFACES=
+	SYNC_RECORDS=
+	SYNC_RECORD_NAMES=
+	SYNC_NEEDS_IPV4=0
+	SYNC_NEEDS_IPV6=0
+	SYNC_CONFIG_ERROR=0
+	config_get SYNC_DOMAIN_ID main domain_id
+	config_get configured_token main token
+	config_get SYNC_TTL main ttl 300
+	config_get SYNC_NOTIFY main notify
+	config_list_foreach main interface append_sync_interface
+	config_list_foreach main record append_sync_record
+
+	[ "$SYNC_CONFIG_ERROR" -eq 0 ] || return 2
+	positive_integer "$SYNC_DOMAIN_ID" || {
+		error 'option domain_id in dldns.main must be a positive integer'
+		return 2
+	}
+	valid_record_ttl "$SYNC_TTL" || {
+		error 'option ttl in dldns.main is unsupported; minimum and default is 300'
+		return 2
+	}
+	[ -n "$SYNC_RECORDS" ] || {
+		error 'at least one list record entry is required in dldns.main'
+		return 2
+	}
+	if [ -n "$SYNC_NOTIFY" ]; then
+		case "$SYNC_NOTIFY" in
+			/*) ;;
+			*)
+				error 'option notify in dldns.main must be an absolute path'
+				return 2
+				;;
+		esac
+		[ -x "$SYNC_NOTIFY" ] || {
+			error "notify hook is not executable: $SYNC_NOTIFY"
+			return 2
+		}
+	fi
+	load_sync_token "$configured_token" || return 2
+}
+
+select_sync_interfaces()
+{
+	local candidates requested
+	if [ -n "$SYNC_CLI_INTERFACES" ]; then
+		candidates=$SYNC_CLI_INTERFACES
+		sync_verbose 'interface source: command line'
+	elif [ -n "$SYNC_CONFIG_INTERFACES" ]; then
+		candidates=$SYNC_CONFIG_INTERFACES
+		sync_verbose 'interface source: UCI configuration'
+	else
+		DUMP=$("$UBUS_CMD" call network.interface dump 2>/dev/null) || {
+			error 'unable to read network.interface dump from ubus'
+			return 1
+		}
+		candidates=$(json_values "$DUMP" '@.interface[@.proto="pppoe"].interface' | normalize_lines)
+		sync_verbose 'interface source: discovered proto=pppoe interfaces'
+	fi
+
+	SYNC_INTERFACES=$(
+		printf '%s\n' "$candidates" |
+		while IFS= read -r requested; do
+			[ -n "$requested" ] && canonical_interface_name "$requested"
+		done |
+		normalize_lines
+	)
+	[ -n "$SYNC_INTERFACES" ] || {
+		error 'no matching network interfaces found'
+		return 1
+	}
+	sync_verbose "interfaces: $(join_lines "$SYNC_INTERFACES")"
+}
+
+public_ipv4_from_list()
+{
+	while IFS= read -r address; do
+		[ -n "$address" ] || continue
+		[ "$(ipv4_scope "$address")" = public ] && printf '%s\n' "$address"
+	done
+}
+
+collect_sync_addresses()
+{
+	local interface interface_ipv4
+	SYNC_IPV4=
+	SYNC_IPV6=
+	for interface in $SYNC_INTERFACES; do
+		load_interface_snapshot "$interface" || {
+			error "interface not found: $interface"
+			return 1
+		}
+		[ "$STATE" = up ] || {
+			error "interface is down: $interface"
+			return 1
+		}
+		interface_ipv4=$(printf '%s\n' "$IPV4" | public_ipv4_from_list)
+		SYNC_IPV4="$SYNC_IPV4
+$interface_ipv4"
+		SYNC_IPV6="$SYNC_IPV6
+$IPV6"
+		if [ "$SYNC_VERBOSE" -eq 1 ]; then
+			sync_verbose "$interface IPv4: $(join_lines "$interface_ipv4")"
+			sync_verbose "$interface IPv6: $(join_lines "$IPV6")"
+		fi
+	done
+	SYNC_IPV4=$(printf '%s\n' "$SYNC_IPV4" | normalize_lines)
+	SYNC_IPV6=$(printf '%s\n' "$SYNC_IPV6" | tr 'A-F' 'a-f' | normalize_lines)
+	sync_verbose "public IPv4 set: $(join_lines "$SYNC_IPV4")"
+	sync_verbose "public IPv6 set: $(join_lines "$SYNC_IPV6")"
+
+	if [ "$SYNC_NEEDS_IPV4" -eq 1 ] && [ -z "$SYNC_IPV4" ]; then
+		error 'configured records require IPv4, but no public IPv4 address was found'
+		return 1
+	fi
+	if [ "$SYNC_NEEDS_IPV6" -eq 1 ] && [ -z "$SYNC_IPV6" ]; then
+		error 'configured records require IPv6, but no public IPv6 address was found'
+		return 1
+	fi
+}
+
+sync_one_record()
+{
+	local entry families want4 want6 filter pages id result
+	entry=$1
+	UPDATE_RECORD=${entry%%:*}
+	families=${entry#*:}
+	want4=
+	want6=
+	case "$families" in *4*) want4=$SYNC_IPV4 ;; esac
+	case "$families" in *6*) want6=$SYNC_IPV6 ;; esac
+
+	if [ "$SYNC_VERBOSE" -eq 1 ]; then
+		if [ -n "$want4" ]; then
+			sync_verbose "$UPDATE_RECORD A: $(join_lines "$want4")"
+		else
+			sync_verbose "$UPDATE_RECORD A: clear"
+		fi
+		if [ -n "$want6" ]; then
+			sync_verbose "$UPDATE_RECORD AAAA: $(join_lines "$want6")"
+		else
+			sync_verbose "$UPDATE_RECORD AAAA: clear"
+		fi
+	fi
+
+	filter=$(printf '{"name":"%s"}' "$UPDATE_RECORD")
+	linode_request GET "/domains/$UPDATE_DOMAIN_ID/records?page_size=500" "" "$filter" || return 1
+	RECORDS_JSON=$LINODE_BODY
+	pages=$(json_values "$RECORDS_JSON" '@.pages')
+	[ -z "$pages" ] || [ "$pages" -eq 1 ] || {
+		error "Linode returned $pages pages for record name $UPDATE_RECORD"
+		return 1
+	}
+
+	CNAME_IDS=$(record_ids_by_type CNAME)
+	if [ -n "$CNAME_IDS" ]; then
+		for id in $CNAME_IDS; do
+			delete_record "$id" CNAME 'conflicting CNAME' || return 1
+		done
+	fi
+
+	result=0
+	reconcile_record_type A "$want4" || result=$?
+	if [ "$result" -eq 0 ]; then
+		reconcile_record_type AAAA "$want6" || result=$?
+	fi
+	return "$result"
+}
+
+run_sync_notify()
+{
+	local status
+	status=$1
+	[ "$SYNC_CHANGE_COUNT" -gt 0 ] || return 0
+	[ -n "$SYNC_NOTIFY" ] || return 0
+	sync_verbose "notify: $SYNC_NOTIFY ($SYNC_CHANGE_COUNT changes, status=$status)"
+	printf 'status %s\n%s\n' "$status" "$SYNC_EVENT_REPORT" |
+		DLDNS_SYNC_STATUS=$status DLDNS_CHANGE_COUNT=$SYNC_CHANGE_COUNT "$SYNC_NOTIFY" || {
+			error "notify hook failed: $SYNC_NOTIFY"
+			return 1
+	}
+}
+
+run_sync()
+{
+	local interface entry result notify_result
+	SYNC_VERBOSE=0
+	SYNC_CLI_INTERFACES=
+	SYNC_MODE=1
+	SYNC_CHANGE_COUNT=0
+	SYNC_EVENT_REPORT=
+	LINODE_API_URL=$DLDNS_LINODE_API_URL
+	[ -n "$LINODE_API_URL" ] || LINODE_API_URL=https://api.linode.com/v4
+
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			-v|--verbose) SYNC_VERBOSE=1 ;;
+			-h|--help)
+				show_sync_help
+				exit 0
+				;;
+			--)
+				shift
+				while [ "$#" -gt 0 ]; do
+					valid_interface_name "$1" || usage_error "invalid interface name: $1"
+					SYNC_CLI_INTERFACES="$SYNC_CLI_INTERFACES
+$1"
+					shift
+				done
+				break
+				;;
+			-*) usage_error "unknown option: $1" ;;
+			*)
+				interface=$1
+				valid_interface_name "$interface" || usage_error "invalid interface name: $interface"
+				SYNC_CLI_INTERFACES="$SYNC_CLI_INTERFACES
+$interface"
+				;;
+		esac
+		shift
+	done
+
+	require_command "$UBUS_CMD" || return 1
+	require_command "$JSONFILTER_CMD" || return 1
+	require_command "$CURL_CMD" || return 1
+	load_sync_config || return $?
+	UPDATE_DOMAIN_ID=$SYNC_DOMAIN_ID
+	UPDATE_TTL=$SYNC_TTL
+	select_sync_interfaces || return 1
+	collect_sync_addresses || return 1
+
+	result=0
+	for entry in $SYNC_RECORDS; do
+		sync_one_record "$entry" || {
+			result=1
+			break
+		}
+	done
+	if [ "$result" -eq 0 ]; then
+		run_sync_notify success || result=1
+	else
+		run_sync_notify failed
+		notify_result=$?
+		[ "$notify_result" -eq 0 ] || result=1
+	fi
+	sync_verbose "summary: changes=$SYNC_CHANGE_COUNT status=$result"
+	return "$result"
+}
+
+run_ip()
+{
+	SHOW_IPV4=0
+	SHOW_IPV6=0
+	FAMILY_SELECTED=0
+	SHOW_EXTERNAL=0
+	PROBE_URL=$DLDNS_PROBE_URL
+	OUTPUT_FORMAT=table
+	QUIET=0
+	REQUESTED_INTERFACES=
+
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			-4|--ipv4)
+				SHOW_IPV4=1
+				FAMILY_SELECTED=1
+				;;
+			-6|--ipv6)
+				SHOW_IPV6=1
+				FAMILY_SELECTED=1
+				;;
+			--external) SHOW_EXTERNAL=1 ;;
+			--probe-url)
+				[ "$#" -ge 2 ] || usage_error '--probe-url requires a URL'
+				PROBE_URL=$2
+				shift
+				;;
+			-o|--format)
+				[ "$#" -ge 2 ] || usage_error "$1 requires a format"
+				OUTPUT_FORMAT=$2
+				shift
+				;;
+			-q|--quiet) QUIET=1 ;;
+			-h|--help)
+				show_ip_help
+				exit 0
+				;;
+			--)
+				shift
+				while [ "$#" -gt 0 ]; do
+					valid_interface_name "$1" ||
+						usage_error "invalid interface name: $1"
+					REQUESTED_INTERFACES="$REQUESTED_INTERFACES
+$1"
+					shift
+				done
+				break
+				;;
+			-*) usage_error "unknown option: $1" ;;
+			*)
+				valid_interface_name "$1" ||
+					usage_error "invalid interface name: $1"
+				REQUESTED_INTERFACES="$REQUESTED_INTERFACES
+$1"
+				;;
+		esac
+		shift
+	done
+
+	if [ "$FAMILY_SELECTED" -eq 0 ]; then
+		SHOW_IPV4=1
+		SHOW_IPV6=1
+	fi
+
+	case "$OUTPUT_FORMAT" in
+		table|json|value) ;;
+		*) usage_error "unsupported output format: $OUTPUT_FORMAT" ;;
+	esac
+
+	if [ -n "$PROBE_URL" ] && [ "$SHOW_EXTERNAL" -ne 1 ]; then
+		usage_error '--probe-url requires --external'
+	fi
+	if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+		[ -n "$PROBE_URL" ] ||
+			usage_error '--external requires --probe-url or DLDNS_PROBE_URL'
+		case "$PROBE_URL" in
+			http://*|https://*) ;;
+			*) usage_error '--probe-url must use http:// or https://' ;;
+		esac
+	fi
+
+	require_command "$UBUS_CMD" || exit 1
+	require_command "$JSONFILTER_CMD" || exit 1
+	if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+		require_command "$CURL_CMD" || exit 1
+	fi
+	if [ "$OUTPUT_FORMAT" = json ]; then
+		[ -r "$JSHN_LIB" ] || {
+			error "required library not found: $JSHN_LIB"
+			exit 1
+		}
+		# shellcheck source=/dev/null
+		. "$JSHN_LIB"
+	fi
+
+	if [ -z "$REQUESTED_INTERFACES" ]; then
+		DUMP=$("$UBUS_CMD" call network.interface dump 2>/dev/null) || {
+			error 'unable to read network.interface dump from ubus'
+			exit 1
+		}
+		INTERFACES=$(
+			json_values "$DUMP" '@.interface[@.proto="pppoe"].interface' |
+			normalize_lines
+		)
+	else
+		INTERFACES=$(
+			printf '%s\n' "$REQUESTED_INTERFACES" |
+			while IFS= read -r requested; do
+				[ -n "$requested" ] &&
+					canonical_interface_name "$requested"
+			done |
+			normalize_lines
+		)
+	fi
+
+	[ -n "$INTERFACES" ] || {
+		error 'no matching network interfaces found'
+		exit 1
+	}
+
+	if [ "$OUTPUT_FORMAT" = value ]; then
+		[ "$(line_count "$INTERFACES")" -eq 1 ] ||
+			usage_error 'value format requires exactly one interface'
+		[ "$SHOW_IPV4" -ne "$SHOW_IPV6" ] ||
+			usage_error 'value format requires exactly one address family (-4 or -6)'
+	fi
+
+	case "$OUTPUT_FORMAT" in
+		table) print_table_header ;;
+		json)
+			json_init
+			json_add_array interfaces
+			;;
+	esac
+
+	RESULT=0
+	for interface in $INTERFACES; do
+		if ! load_interface_snapshot "$interface"; then
+			[ "$QUIET" -eq 1 ] || error "interface not found: $interface"
+			RESULT=1
+			continue
+		fi
+
+		EXTERNAL_IPV4=
+		EXTERNAL_IPV6=
+		if [ "$SHOW_EXTERNAL" -eq 1 ] &&
+			[ "$STATE" = up ] && [ -n "$DEVICE" ]; then
+			if [ "$SHOW_IPV4" -eq 1 ] && [ -n "$IPV4" ]; then
+				EXTERNAL_IPV4=$(probe_external_ip 4 "$DEVICE" "$PROBE_URL") || {
+					[ "$QUIET" -eq 1 ] ||
+						error "external IPv4 probe failed for $interface ($DEVICE)"
+					RESULT=1
+				}
+			fi
+			if [ "$SHOW_IPV6" -eq 1 ] && [ -n "$IPV6" ]; then
+				EXTERNAL_IPV6=$(probe_external_ip 6 "$DEVICE" "$PROBE_URL") || {
+					[ "$QUIET" -eq 1 ] ||
+						error "external IPv6 probe failed for $interface ($DEVICE)"
+					RESULT=1
+				}
+			fi
+		fi
+
+		case "$OUTPUT_FORMAT" in
+			table)
+				print_table_row "$interface" "$STATE" "$DEVICE" "$(join_lines "$IPV4")" "$IPV4_SCOPE" "$(join_lines "$IPV6")" "$EXTERNAL_IPV4" "$EXTERNAL_IPV6"
+				;;
+			json)
+				json_add_object ""
+				json_add_string name "$interface"
+				json_add_string state "$STATE"
+				if [ "$STATE" = up ]; then
+					json_add_boolean up 1
+				else
+					json_add_boolean up 0
+				fi
+				if [ -n "$DEVICE" ]; then
+					json_add_string device "$DEVICE"
+				else
+					json_add_null device
+				fi
+				if [ "$SHOW_IPV4" -eq 1 ]; then
+					json_add_family ipv4 "$IPV4" "$IPV4_SCOPE" "$SHOW_EXTERNAL" "$EXTERNAL_IPV4"
+				fi
+				if [ "$SHOW_IPV6" -eq 1 ]; then
+					IPV6_SCOPE=none
+					[ -n "$IPV6" ] && IPV6_SCOPE=public
+					json_add_family ipv6 "$IPV6" "$IPV6_SCOPE" "$SHOW_EXTERNAL" "$EXTERNAL_IPV6"
+				fi
+				json_close_object
+				;;
+			value)
+				if [ "$SHOW_EXTERNAL" -eq 1 ]; then
+					[ "$SHOW_IPV4" -eq 1 ] &&
+						VALUE=$EXTERNAL_IPV4 || VALUE=$EXTERNAL_IPV6
+				elif [ "$SHOW_IPV4" -eq 1 ]; then
+					VALUE=$IPV4
+				else
+					VALUE=$IPV6
+				fi
+				if [ -n "$VALUE" ]; then
+					printf '%s\n' "$VALUE"
+				else
+					RESULT=1
+				fi
+				;;
+		esac
+	done
+
+	if [ "$OUTPUT_FORMAT" = json ]; then
+		json_close_array
+		json_dump
+		printf '\n'
+	fi
+	return "$RESULT"
+}
+
+COMMAND=$1
+case "$COMMAND" in
+	ip)
+		shift
+		run_ip "$@"
+		;;
+	update)
+		shift
+		run_update "$@"
+		;;
+	sync)
+		shift
+		run_sync "$@"
+		;;
+	help|-h|--help|'') show_main_help ;;
+	version|--version) printf '%s %s\n' "$PROGRAM_NAME" "$PROGRAM_VERSION" ;;
+	*)
+		error "unknown command: $COMMAND"
+		show_main_help >&2
+		exit 2
+		;;
+esac

@@ -1,0 +1,89 @@
+#!/bin/sh
+
+method=GET
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--request)
+			method=$2
+			shift
+			;;
+		--config|--connect-timeout|--max-time|--write-out|--data|--header)
+			shift
+			;;
+	esac
+	shift
+done
+
+printf '%s\n' "$method" >>"$MOCK_CURL_LOG"
+
+case "$MOCK_SCENARIO:$method" in
+	unchanged:GET)
+		body='{"data":[{"id":11,"name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
+	unchanged:DELETE)
+		body='{}'
+		;;
+	create:GET)
+		body='{"data":[],"pages":1}'
+		;;
+	create:POST)
+		body='{"id":21,"name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":300}'
+		;;
+	update:GET)
+		body='{"data":[{"id":31,"name":"soda.p","type":"A","target":"116.237.37.1","ttl_sec":300}],"pages":1}'
+		;;
+	update:PUT)
+		body='{"id":31,"name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":300}'
+		;;
+	multi6:GET)
+		body='{"data":[{"id":61,"name":"soda.p","type":"AAAA","target":"240e::1","ttl_sec":300},{"id":62,"name":"soda.p","type":"AAAA","target":"240e::9","ttl_sec":300},{"id":63,"name":"soda.p","type":"A","target":"198.51.100.9","ttl_sec":300}],"pages":1}'
+		;;
+	multi6:PUT)
+		body='{"id":62,"name":"soda.p","type":"AAAA","target":"240e::2","ttl_sec":300}'
+		;;
+	multi6:DELETE)
+		body='{}'
+		;;
+	surplus6:GET)
+		body='{"data":[{"id":71,"name":"soda.p","type":"AAAA","target":"240e::1","ttl_sec":300},{"id":72,"name":"soda.p","type":"AAAA","target":"240e::2","ttl_sec":300},{"id":73,"name":"soda.p","type":"AAAA","target":"240e::3","ttl_sec":300}],"pages":1}'
+		;;
+	surplus6:DELETE)
+		body='{}'
+		;;
+	cname:GET)
+		body='{"data":[{"id":81,"name":"soda.p","type":"CNAME","target":"old.example","ttl_sec":300}],"pages":1}'
+		;;
+	cname:DELETE)
+		body='{}'
+		;;
+	cname:POST)
+		body='{"id":82,"name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":300}'
+		;;
+	ttl:GET)
+		body='{"data":[{"id":91,"name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":3600}],"pages":1}'
+		;;
+	ttl:PUT)
+		body='{"id":91,"name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":300}'
+		;;
+	sync:GET)
+		body='{"data":[],"pages":1}'
+		;;
+	sync:POST)
+		body='{"id":101,"ttl_sec":300}'
+		;;
+	sync_unchanged:GET)
+		body='{"data":[{"id":111,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
+	sync_clear6:GET)
+		body='{"data":[{"id":121,"name":"soda-v4","type":"A","target":"116.237.37.232","ttl_sec":300},{"id":122,"name":"soda-v4","type":"AAAA","target":"240e::1","ttl_sec":300},{"id":123,"name":"soda-v4","type":"AAAA","target":"240e::2","ttl_sec":300}],"pages":1}'
+		;;
+	sync_clear6:DELETE)
+		body='{}'
+		;;
+	*)
+		printf '%s\n' "unexpected mock request: $MOCK_SCENARIO $method" >&2
+		exit 2
+		;;
+esac
+
+printf '%s\n%s\n' "$body" 200

@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+
+import json
+import re
+import sys
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+try:
+    expression = sys.argv[sys.argv.index("-e") + 1]
+except (ValueError, IndexError):
+    fail("mock jsonfilter requires -e EXPRESSION")
+
+document = json.load(sys.stdin)
+
+simple = {
+    "@.proto": document.get("proto"),
+    "@.up": document.get("up"),
+    "@.l3_device": document.get("l3_device"),
+    "@.pages": document.get("pages"),
+    "@.id": document.get("id"),
+}
+
+if expression in simple:
+    values = [simple[expression]]
+elif expression == '@["ipv4-address"][*].address':
+    values = [item.get("address") for item in document.get("ipv4-address", [])]
+elif expression == '@["ipv6-address"][*].address':
+    values = [item.get("address") for item in document.get("ipv6-address", [])]
+elif expression == "@.errors[*].reason":
+    values = [item.get("reason") for item in document.get("errors", [])]
+elif expression == '@.interface[@.proto="pppoe"].interface':
+    values = [
+        item.get("interface")
+        for item in document.get("interface", [])
+        if item.get("proto") == "pppoe"
+    ]
+else:
+    match = re.fullmatch(r"@\.data\[(.*)\]\.([A-Za-z0-9_]+)", expression)
+    if not match:
+        fail(f"unsupported mock jsonfilter expression: {expression}")
+    conditions, field = match.groups()
+    parsed_conditions = []
+    for condition in conditions.split(" && "):
+        condition_match = re.fullmatch(
+            r'@\.([A-Za-z0-9_]+)=(?:"([^"]*)"|([0-9]+))', condition
+        )
+        if not condition_match:
+            fail(f"unsupported mock jsonfilter condition: {condition}")
+        key, string_value, integer_value = condition_match.groups()
+        expected = string_value if string_value is not None else int(integer_value)
+        parsed_conditions.append((key, expected))
+    values = [
+        item.get(field)
+        for item in document.get("data", [])
+        if all(item.get(key) == expected for key, expected in parsed_conditions)
+    ]
+
+for value in values:
+    if value is None:
+        continue
+    if isinstance(value, bool):
+        print("true" if value else "false")
+    else:
+        print(value)

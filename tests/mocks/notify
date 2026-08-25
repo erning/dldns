@@ -1,0 +1,6 @@
+#!/bin/sh
+
+printf 'status=%s changes=%s\n' "$DLDNS_SYNC_STATUS" "$DLDNS_CHANGE_COUNT" >"$MOCK_NOTIFY_LOG"
+while IFS= read -r line; do
+	printf '%s\n' "$line" >>"$MOCK_NOTIFY_LOG"
+done

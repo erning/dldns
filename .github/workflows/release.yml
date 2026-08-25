@@ -11,39 +11,36 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: 0
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: stable
+      - name: Lint Shell scripts
+        run: |
+          shellcheck -s dash \
+            dldns \
+            tests/test-dldns-ip.sh \
+            tests/test-dldns-sync.sh \
+            tests/test-dldns-update.sh \
+            tests/mocks/curl \
+            tests/mocks/functions.sh \
+            tests/mocks/notify \
+            tests/mocks/ubus
 
-      - name: Build x86_64
-        # OpenWrt x86_64 targets.
-        run: GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o dldns-amd64
+      - name: Test
+        run: |
+          tests/test-dldns-ip.sh
+          tests/test-dldns-update.sh
+          tests/test-dldns-sync.sh
 
-      - name: Build MIPS64 (softfloat)
-        # OpenWrt octeon/generic: ER4, ERLite, USG.
-        run: GOOS=linux GOARCH=mips64 GOMIPS64=softfloat go build -ldflags "-s -w" -o dldns-mips64
-
-      - name: Build MIPS (softfloat)
-        # OpenWrt ramips/mt7621: ERX.
-        run: GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags "-s -w" -o dldns-mipsle
-
-      - name: Build ARM64
-        # OpenWrt arm64: GL-MT3000, GL-MT2500, GL-BE3600, GL-MT3600BE.
-        run: GOOS=linux GOARCH=arm64 go build -ldflags "-s -w" -o dldns-arm64
+      - name: Generate checksum
+        run: sha256sum dldns > dldns.sha256
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dldns-amd64
-            dldns-mips64
-            dldns-mipsle
-            dldns-arm64
+            dldns
+            dldns.sha256
+          fail_on_unmatched_files: true
           generate_release_notes: true

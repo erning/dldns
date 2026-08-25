@@ -1,67 +1,71 @@
 # AGENTS.md
 
-Dynamic DNS client for Linode. Detects outbound IP, updates DNS records. Designed for embedded routers.
+OpenWrt Shell client for Linode dynamic DNS. It discovers addresses from `ubus` and reconciles A/AAAA records through the Linode API.
 
 ## Structure
 
-```
+```text
 dldns/
-├── main.go           # CLI, IP detection, update orchestration
-├── linode.go         # Linode API: auth, record CRUD, conflict resolution
-├── .github/workflows/release.yml  # Multi-arch cross-compilation
-└── go.mod
+├── dldns                       # BusyBox ash program: ip, update, and sync
+├── tests/
+│   ├── test-dldns-ip.sh        # Interface discovery and output tests
+│   ├── test-dldns-update.sh    # Single-record reconciliation tests
+│   ├── test-dldns-sync.sh      # UCI-driven synchronization tests
+│   └── mocks/                  # ubus, jsonfilter, UCI, curl, and notify fakes
+└── .github/workflows/release.yml
 ```
 
 ## Where to Look
 
 | Task | Location |
-|------|----------|
-| Add CLI flags | `main.go` flag.* calls |
-| Change IP detection | `main.go` getOutboundIPv4/v6 |
-| Modify DNS update logic | `linode.go` updateDomainRecord |
-| Add new target arch | `.github/workflows/release.yml` |
+| --- | --- |
+| Change CLI or help | `dldns` `show_*_help` and `run_*` functions |
+| Change interface discovery | `load_interface_snapshot`, `select_sync_interfaces`, `run_ip` |
+| Change address validation | `valid_ipv4`, `valid_ipv6`, `ipv4_scope`, `public_ipv6` |
+| Change Linode API transport | `linode_request` |
+| Change DNS reconciliation | `reconcile_record_type`, `sync_one_record`, `run_update` |
+| Change UCI configuration | `load_sync_config`, `append_sync_record` |
+| Change notifications | `append_sync_event`, `run_sync_notify` |
+| Change release behavior | `.github/workflows/release.yml` |
 
-## Build
+## Runtime
 
-```bash
-# Dev build
-go build
+There is no build step and no architecture-specific output. The executable is the `dldns` source file itself.
 
-# Cross-compile for routers
-CGO_ENABLED=0 GOOS=linux GOARCH=mips64 GOMIPS64=softfloat go build -ldflags "-s -w"  # ER4/ERLite/USG
-CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags "-s -w"    # ERX
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-s -w"                       # GL.iNet
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w"                       # x86_64
+OpenWrt runtime dependencies vary by command:
 
-# Test
-go test ./...
+- `ip`: `ubus`, `jsonfilter`; JSON output also needs `jshn.sh`.
+- `update`: `curl`, `jsonfilter`.
+- `sync`: `ubus`, `curl`, `jsonfilter`, `/lib/functions.sh`.
+
+The script uses `local`, which is supported by BusyBox ash. Lint it with the ShellCheck `dash` dialect rather than strict POSIX `sh`.
+
+## Test
+
+```sh
+shellcheck -s dash \
+    dldns tests/test-dldns-*.sh \
+    tests/mocks/curl tests/mocks/functions.sh \
+    tests/mocks/notify tests/mocks/ubus
+tests/test-dldns-ip.sh
+tests/test-dldns-update.sh
+tests/test-dldns-sync.sh
 ```
+
+Tests must use the dependency overrides (`DLDNS_UBUS`, `DLDNS_JSONFILTER`, `DLDNS_CURL`, `DLDNS_UCI_FUNCTIONS_LIB`, and `DLDNS_LINODE_API_URL`) and must never call the real Linode API.
 
 ## Conventions
 
-- TTL hardcoded to 30 seconds (`const TTL = 30`)
-- Statically linked (`CGO_ENABLED=0`) for embedded deployment
-- Strip symbols (`-ldflags "-s -w"`) to minimize binary size
-- Uses UDP connection to detect outbound IP (no actual data sent)
-
-## Key Patterns
-
-**IP Detection**: Opens UDP socket to public DNS server, reads local address. No packets sent.
-```go
-conn, _ := net.Dial("udp", "114.114.114.114:53")
-localAddr := conn.LocalAddr().(*net.UDPAddr)
-return localAddr.IP
-```
-
-**Smart Updates**: DNS lookup before API call to skip unnecessary updates.
-
-**Conflict Resolution**: Auto-removes CNAME records conflicting with A/AAAA. Deduplicates records.
-
-## Dependencies
-
-- `github.com/linode/linodego` — Linode API client
-- `golang.org/x/oauth2` — Token auth
+- Keep the program compatible with OpenWrt BusyBox ash.
+- No command may mutate UCI, netifd, routes, cron, or other local router state.
+- `ip` is read-only; `--external` may only perform an address probe.
+- Default and minimum Linode TTL is 300 seconds; accept only values supported by `valid_record_ttl`.
+- Token files are read from the first line. Never print the token or place it directly in curl arguments.
+- `update` changes only explicitly selected address families.
+- `sync` reconciles both A and AAAA for every configured record, clearing a family omitted from that record's UCI entry.
+- Remove same-name CNAME records before creating A/AAAA records and deduplicate all reconciled records.
+- Refuse synchronization when a required family has no discovered public address.
 
 ## Release
 
-Tag with `v*` triggers GitHub Actions → builds 4 binaries → creates release.
+A `v*` tag triggers GitHub Actions. The workflow lints and tests the script, then publishes `dldns` and `dldns.sha256` as release assets.
