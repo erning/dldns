@@ -56,7 +56,7 @@ run_case()
 expect_output()
 {
 	needle=$1
-	if ! printf '%s\n' "$output" | grep -F "$needle" >/dev/null; then
+	if ! printf '%s\n' "$output" | grep -F -- "$needle" >/dev/null; then
 		printf 'not ok - output missing: %s\n%s\n' "$needle" "$output"
 		failures=$((failures + 1))
 	fi
@@ -65,7 +65,7 @@ expect_output()
 expect_no_output()
 {
 	needle=$1
-	if printf '%s\n' "$output" | grep -F "$needle" >/dev/null; then
+	if printf '%s\n' "$output" | grep -F -- "$needle" >/dev/null; then
 		printf 'not ok - unexpected output: %s\n%s\n' "$needle" "$output"
 		failures=$((failures + 1))
 	fi
@@ -137,6 +137,35 @@ MOCK_CONFIG_RECORDS='soda-v6 6'
 export MOCK_CONFIG_TOKEN MOCK_CONFIG_RECORDS
 run_case token_file 0 sync pppoe1
 expect_methods 'GET POST'
+
+reset_config
+MOCK_CONFIG_TTL=120
+MOCK_CONFIG_INTERFACES=pppoe2
+MOCK_CONFIG_RECORDS='soda-v4 4'
+MOCK_EXPECT_TTL=120
+export MOCK_CONFIG_TTL MOCK_CONFIG_INTERFACES MOCK_CONFIG_RECORDS MOCK_EXPECT_TTL
+run_case short_ttl 0 sync
+expect_methods 'GET POST'
+MOCK_EXPECT_TTL=
+export MOCK_EXPECT_TTL
+
+reset_config
+MOCK_CONFIG_TTL=60
+MOCK_CONFIG_INTERFACES=pppoe2
+MOCK_CONFIG_RECORDS='soda-v4 4'
+MOCK_EXPECT_TTL=60
+export MOCK_CONFIG_TTL MOCK_CONFIG_INTERFACES MOCK_CONFIG_RECORDS MOCK_EXPECT_TTL
+run_case arbitrary_ttl 0 sync
+expect_methods 'GET POST'
+MOCK_EXPECT_TTL=
+export MOCK_EXPECT_TTL
+
+reset_config
+MOCK_CONFIG_TTL=0
+export MOCK_CONFIG_TTL
+run_case invalid_ttl 2 sync
+expect_output 'must be a positive integer'
+expect_methods ''
 
 reset_config
 MOCK_NOTIFY_LOG=$TMP_ROOT/notify.log

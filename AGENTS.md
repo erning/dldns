@@ -59,7 +59,7 @@ Tests must use the dependency overrides (`DLDNS_UBUS`, `DLDNS_JSONFILTER`, `DLDN
 - Keep the program compatible with OpenWrt BusyBox ash.
 - No command may mutate UCI, netifd, routes, cron, or other local router state.
 - `ip` is read-only; `--external` may only perform an address probe.
-- Default and minimum Linode TTL is 300 seconds; accept only values supported by `valid_record_ttl`.
+- Default Linode TTL is 300 seconds. Accept any positive integer and let the API handle normalization.
 - Token files are read from the first line. Never print the token or place it directly in curl arguments.
 - `update` changes only explicitly selected address families.
 - `sync` reconciles both A and AAAA for every configured record, clearing a family omitted from that record's UCI entry.

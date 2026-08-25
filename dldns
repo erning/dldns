@@ -105,7 +105,7 @@ Required:
 Options:
       --clear-ipv4        Delete all A records for RECORD
       --clear-ipv6        Delete all AAAA records for RECORD
-      --ttl SECONDS       Record TTL (default: 300)
+      --ttl SECONDS       Record TTL in seconds (default: 300)
   -h, --help              Show this help
 
 Examples:
@@ -506,16 +506,6 @@ positive_integer()
 		''|*[!0-9]*) return 1 ;;
 	esac
 	[ "$1" -gt 0 ] 2>/dev/null
-}
-
-valid_record_ttl()
-{
-	case "$1" in
-		300|3600|7200|14400|28800|57600|86400|172800|345600|604800|1209600|2419200)
-			return 0
-			;;
-		*) return 1 ;;
-	esac
 }
 
 valid_record_name()
@@ -969,7 +959,7 @@ $2"
 	if [ "$UPDATE_CLEAR_IPV6" -eq 1 ] && [ -n "$UPDATE_TARGET_IPV6" ]; then
 		usage_error '--clear-ipv6 cannot be combined with --ipv6/-6'
 	fi
-	valid_record_ttl "$UPDATE_TTL" || usage_error 'unsupported TTL; minimum and default is 300'
+	positive_integer "$UPDATE_TTL" || usage_error '--ttl must be a positive integer'
 
 	require_command "$JSONFILTER_CMD" || return 1
 	require_command "$CURL_CMD" || return 1
@@ -1034,8 +1024,8 @@ load_sync_config()
 		error 'option domain_id in dldns.main must be a positive integer'
 		return 2
 	}
-	valid_record_ttl "$SYNC_TTL" || {
-		error 'option ttl in dldns.main is unsupported; minimum and default is 300'
+	positive_integer "$SYNC_TTL" || {
+		error 'option ttl in dldns.main must be a positive integer'
 		return 2
 	}
 	[ -n "$SYNC_RECORDS" ] || {

@@ -1,13 +1,18 @@
 #!/bin/sh
 
 method=GET
+data=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--request)
 			method=$2
 			shift
 			;;
-		--config|--connect-timeout|--max-time|--write-out|--data|--header)
+		--data)
+			data=$2
+			shift
+			;;
+		--config|--connect-timeout|--max-time|--write-out|--header)
 			shift
 			;;
 	esac
@@ -15,6 +20,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 printf '%s\n' "$method" >>"$MOCK_CURL_LOG"
+
+if [ -n "${MOCK_EXPECT_TTL:-}" ] && [ "$method" != GET ]; then
+	case "$data" in
+		*\"ttl_sec\":$MOCK_EXPECT_TTL*) ;;
+		*)
+			printf 'request body does not contain ttl_sec=%s: %s\n' "$MOCK_EXPECT_TTL" "$data" >&2
+			exit 2
+			;;
+	esac
+fi
 
 case "$MOCK_SCENARIO:$method" in
 	unchanged:GET)

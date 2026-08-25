@@ -46,7 +46,7 @@ run_case()
 expect_output()
 {
 	needle=$1
-	if ! printf '%s\n' "$output" | grep -F "$needle" >/dev/null; then
+	if ! printf '%s\n' "$output" | grep -F -- "$needle" >/dev/null; then
 		printf 'not ok - output missing: %s\n%s\n' "$needle" "$output"
 		failures=$((failures + 1))
 	fi
@@ -91,6 +91,26 @@ expect_methods 'GET DELETE POST'
 run_case update_ttl 0 ttl --ttl 300 -4 116.237.37.232 soda.p
 expect_output updated
 expect_methods 'GET PUT'
+
+MOCK_EXPECT_TTL=30
+export MOCK_EXPECT_TTL
+run_case update_short_ttl 0 ttl --ttl 30 -4 116.237.37.232 soda.p
+expect_output updated
+expect_methods 'GET PUT'
+MOCK_EXPECT_TTL=
+export MOCK_EXPECT_TTL
+
+MOCK_EXPECT_TTL=60
+export MOCK_EXPECT_TTL
+run_case update_arbitrary_ttl 0 ttl --ttl 60 -4 116.237.37.232 soda.p
+expect_output updated
+expect_methods 'GET PUT'
+MOCK_EXPECT_TTL=
+export MOCK_EXPECT_TTL
+
+run_case invalid_ttl 2 unchanged --ttl 0 -4 116.237.37.232 soda.p
+expect_output '--ttl must be a positive integer'
+expect_methods ''
 
 run_case duplicate_input 0 create -4 116.237.37.232 --ipv4 116.237.37.232 soda.p
 expect_output created

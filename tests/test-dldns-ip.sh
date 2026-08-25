@@ -33,7 +33,7 @@ run_case()
 expect_output()
 {
 	needle=$1
-	if ! printf '%s\n' "$output" | grep -F "$needle" >/dev/null; then
+	if ! printf '%s\n' "$output" | grep -F -- "$needle" >/dev/null; then
 		printf 'not ok - output missing: %s\n%s\n' "$needle" "$output"
 		failures=$((failures + 1))
 	fi
