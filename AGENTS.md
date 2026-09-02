@@ -11,7 +11,7 @@ dldns/
 │   ├── test-dldns-ip.sh        # Interface discovery and output tests
 │   ├── test-dldns-update.sh    # Single-record reconciliation tests
 │   ├── test-dldns-sync.sh      # UCI-driven synchronization tests
-│   └── mocks/                  # ubus, jsonfilter, UCI, curl, and notify fakes
+│   └── mocks/                  # ubus, jsonfilter, UCI, curl, dig, and notify fakes
 └── .github/workflows/release.yml
 ```
 
@@ -23,8 +23,9 @@ dldns/
 | Change interface discovery | `load_interface_snapshot`, `select_sync_interfaces`, `run_ip` |
 | Change address validation | `valid_ipv4`, `valid_ipv6`, `ipv4_scope`, `public_ipv6` |
 | Change Linode API transport | `linode_request` |
-| Change DNS reconciliation | `reconcile_record_type`, `sync_one_record`, `run_update` |
-| Change UCI configuration | `load_sync_config`, `append_sync_record` |
+| Change DNS preflight | `dns_query_set`, `dns_record_matches`, `dns_preflight_matches` |
+| Change DNS reconciliation | `append_record_cache`, `reconcile_record_type`, `sync_one_record`, `run_update` |
+| Change UCI configuration | `load_sync_config`, `append_sync_record`, `append_sync_nameserver` |
 | Change notifications | `append_sync_event`, `run_sync_notify` |
 | Change release behavior | `.github/workflows/release.yml` |
 
@@ -36,7 +37,7 @@ OpenWrt runtime dependencies vary by command:
 
 - `ip`: `ubus`, `jsonfilter`; JSON output also needs `jshn.sh`.
 - `update`: `curl`, `jsonfilter`.
-- `sync`: `ubus`, `curl`, `jsonfilter`, `/lib/functions.sh`.
+- `sync`: `ubus`, `curl`, `jsonfilter`, `/lib/functions.sh`; optional `dig` for the DNS preflight.
 
 The script uses `local`, which is supported by BusyBox ash. Lint it with the ShellCheck `dash` dialect rather than strict POSIX `sh`.
 
@@ -45,14 +46,14 @@ The script uses `local`, which is supported by BusyBox ash. Lint it with the She
 ```sh
 shellcheck -s dash \
     dldns tests/test-dldns-*.sh \
-    tests/mocks/curl tests/mocks/functions.sh \
+    tests/mocks/curl tests/mocks/dig tests/mocks/functions.sh \
     tests/mocks/notify tests/mocks/ubus
 tests/test-dldns-ip.sh
 tests/test-dldns-update.sh
 tests/test-dldns-sync.sh
 ```
 
-Tests must use the dependency overrides (`DLDNS_UBUS`, `DLDNS_JSONFILTER`, `DLDNS_CURL`, `DLDNS_UCI_FUNCTIONS_LIB`, and `DLDNS_LINODE_API_URL`) and must never call the real Linode API.
+Tests must use the dependency overrides (`DLDNS_UBUS`, `DLDNS_JSONFILTER`, `DLDNS_CURL`, `DLDNS_DIG`, `DLDNS_UCI_FUNCTIONS_LIB`, and `DLDNS_LINODE_API_URL`) and must never call the real Linode API or DNS resolvers.
 
 ## Conventions
 
@@ -63,8 +64,11 @@ Tests must use the dependency overrides (`DLDNS_UBUS`, `DLDNS_JSONFILTER`, `DLDN
 - Token files are read from the first line. Never print the token or place it directly in curl arguments.
 - `update` changes only explicitly selected address families.
 - `sync` reconciles both A and AAAA for every configured record, clearing a family omitted from that record's UCI entry.
+- The optional DNS preflight skips API access when any configured resolver returns the expected A/AAAA sets and no CNAME for every configured record; `--force-api` bypasses it.
+- A missing optional `dig` command must emit a warning before falling back to the API.
+- When API access is needed, fetch the domain record list once or by pagination instead of once per configured name.
 - Remove same-name CNAME records before creating A/AAAA records and deduplicate all reconciled records.
-- Refuse synchronization when a required family has no discovered public address.
+- Treat successful discovery with no public address for a family as an empty desired set and clear that family; make no DNS changes when address discovery fails.
 
 ## Release
 

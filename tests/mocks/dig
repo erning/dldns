@@ -1,0 +1,44 @@
+#!/bin/sh
+
+server=system
+fqdn=
+type=
+for argument in "$@"; do
+	case "$argument" in
+		@*) server=${argument#@} ;;
+		A|AAAA|CNAME) type=$argument ;;
+		+*) ;;
+		*) [ -n "$fqdn" ] || fqdn=$argument ;;
+	esac
+done
+
+printf '%s %s %s\n' "$server" "$fqdn" "$type" >>"$MOCK_DIG_LOG"
+
+scenario=${MOCK_DIG_SCENARIO:-mismatch}
+if [ "$scenario" = match_second ]; then
+	if [ "$server" = resolver.example ]; then
+		scenario=match_pppoe2
+	else
+		scenario=mismatch
+	fi
+fi
+
+case "$scenario" in
+	error) exit 1 ;;
+	match_pppoe2)
+		printf '%s\n' ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1'
+		printf '%s\n' ';; flags: qr rd ra; QUERY: 1, ANSWER: 1'
+		case "$type" in
+			A) printf '%s\n' "$fqdn 300 IN A 116.237.37.232" ;;
+			AAAA)
+				printf '%s\n' "$fqdn 300 IN AAAA 240e:b8f:9b00:8a22::1"
+				printf '%s\n' "$fqdn 300 IN AAAA 240e:b8f:9b00:8a22:0:0:0:2"
+				;;
+		esac
+		;;
+	*)
+		printf '%s\n' ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1'
+		printf '%s\n' ';; flags: qr rd ra; QUERY: 1, ANSWER: 1'
+		[ "$type" != A ] || printf '%s\n' "$fqdn 300 IN A 192.0.2.99"
+		;;
+esac

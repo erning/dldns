@@ -4,7 +4,7 @@
 # No command changes UCI, netifd, routes, cron, or local router state.
 
 PROGRAM_NAME=$(basename "$0")
-PROGRAM_VERSION=0.4.0
+PROGRAM_VERSION=0.5.0
 
 UBUS_CMD=$DLDNS_UBUS
 [ -n "$UBUS_CMD" ] || UBUS_CMD=ubus
@@ -12,6 +12,8 @@ JSONFILTER_CMD=$DLDNS_JSONFILTER
 [ -n "$JSONFILTER_CMD" ] || JSONFILTER_CMD=jsonfilter
 CURL_CMD=$DLDNS_CURL
 [ -n "$CURL_CMD" ] || CURL_CMD=curl
+DIG_CMD=$DLDNS_DIG
+[ -n "$DIG_CMD" ] || DIG_CMD=dig
 JSHN_LIB=$DLDNS_JSHN_LIB
 [ -n "$JSHN_LIB" ] || JSHN_LIB=/usr/share/libubox/jshn.sh
 UCI_FUNCTIONS_LIB=$DLDNS_UCI_FUNCTIONS_LIB
@@ -20,6 +22,11 @@ UCI_FUNCTIONS_LIB=$DLDNS_UCI_FUNCTIONS_LIB
 error()
 {
 	printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+}
+
+warning()
+{
+	printf '%s: warning: %s\n' "$PROGRAM_NAME" "$*" >&2
 }
 
 sync_verbose()
@@ -124,7 +131,7 @@ show_sync_help()
 {
 	cat <<EOF
 Usage:
-  $PROGRAM_NAME sync [-v|--verbose] [INTERFACE...]
+  $PROGRAM_NAME sync [--force-api] [-v|--verbose] [INTERFACE...]
 
 Discover public addresses on selected OpenWrt interfaces and synchronize the
 Linode records configured in /etc/config/dldns. Command-line interfaces take
@@ -132,14 +139,17 @@ precedence over configured interfaces. If neither is present, all interfaces
 using proto=pppoe are discovered.
 
 Options:
-  -v, --verbose           Show interfaces, addresses, plans, API requests, and unchanged records
+      --force-api         Skip the DNS preflight and query the Linode API
+  -v, --verbose           Show DNS checks, interfaces, addresses, plans, API requests, and unchanged records
   -h, --help              Show this help
 
 Configuration example:
   config dldns 'main'
           option domain_id '12345'
+          option domain 'example.com'
           option token '@/root/linode.token'
           option ttl '300'
+          list nameserver '192.0.2.53'
           list interface 'pppoe1'
           list record 'soda 4 6'
           list record 'soda-v4 4'
@@ -314,6 +324,7 @@ public_ipv6()
 {
 	local address
 	address=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+	valid_ipv6 "$address" || return 1
 	case "$address" in
 		2*|3*) return 0 ;;
 		*) return 1 ;;
@@ -516,6 +527,22 @@ valid_record_name()
 	esac
 }
 
+valid_domain_name()
+{
+	case "$1" in
+		''|.*|*..*|*[!A-Za-z0-9.-]*|*-) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+valid_nameserver()
+{
+	case "$1" in
+		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
 sync_record_name_seen()
 {
 	case "
@@ -536,6 +563,17 @@ append_sync_interface()
 		return
 	fi
 	SYNC_CONFIG_INTERFACES="$SYNC_CONFIG_INTERFACES
+$1"
+}
+
+append_sync_nameserver()
+{
+	if ! valid_nameserver "$1"; then
+		error "invalid nameserver in dldns.main: $1"
+		SYNC_CONFIG_ERROR=1
+		return
+	fi
+	SYNC_CONFIG_NAMESERVERS="$SYNC_CONFIG_NAMESERVERS
 $1"
 }
 
@@ -601,11 +639,9 @@ append_sync_record()
 	canonical=$name:
 	if [ "$has4" -eq 1 ]; then
 		canonical=${canonical}4
-		SYNC_NEEDS_IPV4=1
 	fi
 	if [ "$has6" -eq 1 ]; then
 		canonical=${canonical}6
-		SYNC_NEEDS_IPV6=1
 	fi
 	SYNC_RECORDS="$SYNC_RECORDS
 $canonical"
@@ -767,24 +803,60 @@ emit_update_change()
 	esac
 }
 
+append_record_cache()
+{
+	local document type ids id name target ttl
+	document=$1
+	for type in A AAAA CNAME; do
+		ids=$(json_values "$document" "@.data[@.type=\"$type\"].id")
+		for id in $ids; do
+			name=$(json_values "$document" "@.data[@.id=$id].name") || name=
+			target=$(json_values "$document" "@.data[@.id=$id].target") || return 1
+			ttl=$(json_values "$document" "@.data[@.id=$id].ttl_sec") || return 1
+			[ -n "$target" ] && [ -n "$ttl" ] || {
+				error "Linode returned an incomplete DNS record: $id"
+				return 1
+			}
+			RECORD_CACHE="$RECORD_CACHE
+$id	$name	$type	$target	$ttl"
+		done
+	done
+}
+
 record_ids_by_type()
 {
-	json_values "$RECORDS_JSON" "@.data[@.type=\"$1\"].id"
+	printf '%s\n' "$RECORD_CACHE" |
+		awk -F '\t' -v name="$UPDATE_RECORD" -v type="$1" \
+			'$2 == name && $3 == type { print $1 }'
 }
 
 record_ids_by_type_target()
 {
-	json_values "$RECORDS_JSON" "@.data[@.type=\"$1\" && @.target=\"$2\"].id"
+	printf '%s\n' "$RECORD_CACHE" |
+		awk -F '\t' -v name="$UPDATE_RECORD" -v type="$1" -v target="$2" \
+			'$2 == name && $3 == type && $4 == target { print $1 }'
 }
 
 record_field_by_id()
 {
-	json_values "$RECORDS_JSON" "@.data[@.id=$1].$2"
+	local field
+	case "$2" in
+		name) field=2 ;;
+		type) field=3 ;;
+		target) field=4 ;;
+		ttl_sec) field=5 ;;
+		*) return 1 ;;
+	esac
+	printf '%s\n' "$RECORD_CACHE" |
+		awk -F '\t' -v id="$1" -v field="$field" \
+			'$1 == id { print $field; exit }'
 }
 
 exact_record_ids()
 {
-	json_values "$RECORDS_JSON" "@.data[@.type=\"$1\" && @.target=\"$2\" && @.ttl_sec=$UPDATE_TTL].id"
+	printf '%s\n' "$RECORD_CACHE" |
+		awk -F '\t' -v name="$UPDATE_RECORD" -v type="$1" -v target="$2" -v ttl="$UPDATE_TTL" \
+			'$2 == name && $3 == type && $4 == target && $5 == ttl { print $1 }'
 }
 
 delete_record()
@@ -974,6 +1046,8 @@ $2"
 		error "Linode returned $pages pages for record name $UPDATE_RECORD"
 		return 1
 	}
+	RECORD_CACHE=
+	append_record_cache "$RECORDS_JSON" || return 1
 
 	CNAME_IDS=$(record_ids_by_type CNAME)
 	if { [ -n "$UPDATE_TARGET_IPV4" ] || [ -n "$UPDATE_TARGET_IPV6" ]; } && [ -n "$CNAME_IDS" ]; then
@@ -1007,21 +1081,27 @@ load_sync_config()
 	}
 
 	SYNC_CONFIG_INTERFACES=
+	SYNC_CONFIG_NAMESERVERS=
 	SYNC_RECORDS=
 	SYNC_RECORD_NAMES=
-	SYNC_NEEDS_IPV4=0
-	SYNC_NEEDS_IPV6=0
 	SYNC_CONFIG_ERROR=0
 	config_get SYNC_DOMAIN_ID main domain_id
+	config_get SYNC_DOMAIN main domain
 	config_get configured_token main token
 	config_get SYNC_TTL main ttl 300
 	config_get SYNC_NOTIFY main notify
 	config_list_foreach main interface append_sync_interface
+	config_list_foreach main nameserver append_sync_nameserver
 	config_list_foreach main record append_sync_record
 
+	SYNC_DOMAIN=${SYNC_DOMAIN%.}
 	[ "$SYNC_CONFIG_ERROR" -eq 0 ] || return 2
 	positive_integer "$SYNC_DOMAIN_ID" || {
 		error 'option domain_id in dldns.main must be a positive integer'
+		return 2
+	}
+	valid_domain_name "$SYNC_DOMAIN" || {
+		error 'option domain in dldns.main must be a valid DNS name'
 		return 2
 	}
 	positive_integer "$SYNC_TTL" || {
@@ -1116,20 +1196,242 @@ $IPV6"
 	SYNC_IPV6=$(printf '%s\n' "$SYNC_IPV6" | tr 'A-F' 'a-f' | normalize_lines)
 	sync_verbose "public IPv4 set: $(join_lines "$SYNC_IPV4")"
 	sync_verbose "public IPv6 set: $(join_lines "$SYNC_IPV6")"
+}
 
-	if [ "$SYNC_NEEDS_IPV4" -eq 1 ] && [ -z "$SYNC_IPV4" ]; then
-		error 'configured records require IPv4, but no public IPv4 address was found'
+canonical_ipv6()
+{
+	local address
+	address=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+	valid_ipv6 "$address" || return 1
+	printf '%s\n' "$address" |
+		awk '
+		function append(group) {
+			sub(/^0+/, "", group)
+			if (group == "")
+				group = "0"
+			result = result (result == "" ? "" : ":") group
+		}
+		{
+			position = index($0, "::")
+			if (position > 0) {
+				left = substr($0, 1, position - 1)
+				right = substr($0, position + 2)
+				left_count = left == "" ? 0 : split(left, left_part, ":")
+				right_count = right == "" ? 0 : split(right, right_part, ":")
+				for (i = 1; i <= left_count; i++)
+					append(left_part[i])
+				for (i = 1; i <= 8 - left_count - right_count; i++)
+					append("0")
+				for (i = 1; i <= right_count; i++)
+					append(right_part[i])
+			} else {
+				count = split($0, part, ":")
+				for (i = 1; i <= count; i++)
+					append(part[i])
+			}
+			print result
+		}'
+}
+
+normalize_address_targets()
+{
+	local family address
+	family=$1
+	while IFS= read -r address; do
+		[ -n "$address" ] || continue
+		case "$family" in
+			4) printf '%s\n' "$address" ;;
+			6) canonical_ipv6 "$address" ;;
+		esac
+	done |
+		LC_ALL=C sort -u
+}
+
+dns_query_set()
+{
+	local server fqdn type output status raw address normalized
+	server=$1
+	fqdn=$2
+	type=$3
+	set -- "$fqdn" "$type" +time=2 +tries=1 +noall +comments +answer
+	[ -z "$server" ] || set -- "@$server" "$@"
+	output=$("$DIG_CMD" "$@" 2>/dev/null)
+	status=$?
+	DNS_QUERY_STATUS=command-failed
+	DNS_VALUES=
+	[ "$status" -eq 0 ] || return 2
+
+	DNS_QUERY_STATUS=$(
+		printf '%s\n' "$output" |
+			awk '/status:/ {
+				for (i = 1; i <= NF; i++) {
+					if ($i == "status:") {
+						value = $(i + 1)
+						sub(/,$/, "", value)
+						print value
+						exit
+					}
+				}
+			}'
+	)
+	case "$DNS_QUERY_STATUS" in
+		NXDOMAIN) return 0 ;;
+		NOERROR) ;;
+		'')
+			DNS_QUERY_STATUS=unrecognized-response
+			return 2
+			;;
+		*) return 2 ;;
+	esac
+
+	raw=$(
+		printf '%s\n' "$output" |
+			awk -v type="$type" '$0 !~ /^;/ && $4 == type { print $5 }'
+	)
+	case "$type" in
+		A)
+			for address in $raw; do
+				valid_ipv4 "$address" || {
+					DNS_QUERY_STATUS=invalid-answer
+					return 2
+				}
+			done
+			DNS_VALUES=$(printf '%s\n' "$raw" | normalize_lines | LC_ALL=C sort)
+			;;
+		AAAA)
+			normalized=
+			for address in $raw; do
+				valid_ipv6 "$address" || {
+					DNS_QUERY_STATUS=invalid-answer
+					return 2
+				}
+				normalized="$normalized
+$(canonical_ipv6 "$address")"
+			done
+			DNS_VALUES=$(printf '%s\n' "$normalized" | normalize_lines | LC_ALL=C sort)
+			;;
+		CNAME)
+			DNS_VALUES=$(printf '%s\n' "$raw" | tr '[:upper:]' '[:lower:]' | normalize_lines | LC_ALL=C sort)
+			;;
+	esac
+}
+
+dns_record_matches()
+{
+	local server label fqdn expected4 expected6 result report expected_report
+	server=$1
+	label=$server
+	[ -n "$label" ] || label=system
+	fqdn=$2
+	expected4=$3
+	expected6=$4
+
+	if dns_query_set "$server" "$fqdn" A; then
+		result=$DNS_VALUES
+	else
+		sync_verbose "DNS $label $fqdn A: unavailable ($DNS_QUERY_STATUS)"
 		return 1
 	fi
-	if [ "$SYNC_NEEDS_IPV6" -eq 1 ] && [ -z "$SYNC_IPV6" ]; then
-		error 'configured records require IPv6, but no public IPv6 address was found'
+	report=$(dash_if_empty "$(join_lines "$result")")
+	expected_report=$(dash_if_empty "$(join_lines "$expected4")")
+	if [ "$result" != "$expected4" ]; then
+		sync_verbose "DNS $label $fqdn A: mismatch (actual=$report expected=$expected_report)"
 		return 1
 	fi
+	sync_verbose "DNS $label $fqdn A: match ($report)"
+
+	if dns_query_set "$server" "$fqdn" AAAA; then
+		result=$DNS_VALUES
+	else
+		sync_verbose "DNS $label $fqdn AAAA: unavailable ($DNS_QUERY_STATUS)"
+		return 1
+	fi
+	report=$(dash_if_empty "$(join_lines "$result")")
+	expected_report=$(dash_if_empty "$(join_lines "$expected6")")
+	if [ "$result" != "$expected6" ]; then
+		sync_verbose "DNS $label $fqdn AAAA: mismatch (actual=$report expected=$expected_report)"
+		return 1
+	fi
+	sync_verbose "DNS $label $fqdn AAAA: match ($report)"
+
+	if dns_query_set "$server" "$fqdn" CNAME; then
+		result=$DNS_VALUES
+	else
+		sync_verbose "DNS $label $fqdn CNAME: unavailable ($DNS_QUERY_STATUS)"
+		return 1
+	fi
+	if [ -n "$result" ]; then
+		sync_verbose "DNS $label $fqdn CNAME: mismatch (actual=$(join_lines "$result") expected=-)"
+		return 1
+	fi
+	sync_verbose "DNS $label $fqdn CNAME: match (-)"
+}
+
+dns_preflight_matches()
+{
+	local servers entry name families fqdn expected4 expected6 server label matched
+	servers=$SYNC_CONFIG_NAMESERVERS
+	[ -n "$servers" ] || servers=@system-default@
+
+	for server in $servers; do
+		[ "$server" != @system-default@ ] || server=
+		label=$server
+		[ -n "$label" ] || label=system
+		matched=1
+		for entry in $SYNC_RECORDS; do
+			name=${entry%%:*}
+			families=${entry#*:}
+			case "$name" in
+				*'*'*|-*)
+					sync_verbose "DNS preflight cannot check record name: $name"
+					matched=0
+					break
+					;;
+			esac
+			fqdn=$name.$SYNC_DOMAIN.
+			expected4=
+			expected6=
+			case "$families" in *4*) expected4=$(printf '%s\n' "$SYNC_IPV4" | normalize_address_targets 4) ;; esac
+			case "$families" in *6*) expected6=$(printf '%s\n' "$SYNC_IPV6" | normalize_address_targets 6) ;; esac
+			dns_record_matches "$server" "$fqdn" "$expected4" "$expected6" || {
+				matched=0
+				break
+			}
+		done
+		if [ "$matched" -eq 1 ]; then
+			sync_verbose "DNS preflight matched via $label"
+			return 0
+		fi
+		sync_verbose "DNS preflight did not match via $label"
+	done
+	return 1
+}
+
+fetch_sync_record_cache()
+{
+	local page pages
+	page=1
+	pages=1
+	RECORD_CACHE=
+	while [ "$page" -le "$pages" ]; do
+		linode_request GET "/domains/$UPDATE_DOMAIN_ID/records?page_size=500&page=$page" "" "" ||
+			return 1
+		append_record_cache "$LINODE_BODY" || return 1
+		if [ "$page" -eq 1 ]; then
+			pages=$(json_values "$LINODE_BODY" '@.pages')
+			[ -n "$pages" ] || pages=1
+			positive_integer "$pages" || {
+				error 'Linode returned an invalid records page count'
+				return 1
+			}
+		fi
+		page=$((page + 1))
+	done
 }
 
 sync_one_record()
 {
-	local entry families want4 want6 filter pages id result
+	local entry families want4 want6 id result
 	entry=$1
 	UPDATE_RECORD=${entry%%:*}
 	families=${entry#*:}
@@ -1150,15 +1452,6 @@ sync_one_record()
 			sync_verbose "$UPDATE_RECORD AAAA: clear"
 		fi
 	fi
-
-	filter=$(printf '{"name":"%s"}' "$UPDATE_RECORD")
-	linode_request GET "/domains/$UPDATE_DOMAIN_ID/records?page_size=500" "" "$filter" || return 1
-	RECORDS_JSON=$LINODE_BODY
-	pages=$(json_values "$RECORDS_JSON" '@.pages')
-	[ -z "$pages" ] || [ "$pages" -eq 1 ] || {
-		error "Linode returned $pages pages for record name $UPDATE_RECORD"
-		return 1
-	}
 
 	CNAME_IDS=$(record_ids_by_type CNAME)
 	if [ -n "$CNAME_IDS" ]; then
@@ -1193,6 +1486,7 @@ run_sync()
 {
 	local interface entry result notify_result
 	SYNC_VERBOSE=0
+	SYNC_FORCE_API=0
 	SYNC_CLI_INTERFACES=
 	SYNC_MODE=1
 	SYNC_CHANGE_COUNT=0
@@ -1202,6 +1496,7 @@ run_sync()
 
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
+			--force-api) SYNC_FORCE_API=1 ;;
 			-v|--verbose) SYNC_VERBOSE=1 ;;
 			-h|--help)
 				show_sync_help
@@ -1237,6 +1532,22 @@ $interface"
 	select_sync_interfaces || return 1
 	collect_sync_addresses || return 1
 
+	if [ "$SYNC_FORCE_API" -eq 1 ]; then
+		sync_verbose 'DNS preflight skipped: --force-api'
+	elif ! command -v "$DIG_CMD" >/dev/null 2>&1; then
+		warning "DNS preflight skipped: dig command not found ($DIG_CMD)"
+	elif dns_preflight_matches; then
+		sync_verbose 'DNS preflight matched; skipping Linode API'
+		sync_verbose 'summary: changes=0 status=0'
+		return 0
+	else
+		sync_verbose 'DNS preflight did not match; querying Linode API'
+	fi
+
+	fetch_sync_record_cache || {
+		sync_verbose 'summary: changes=0 status=1'
+		return 1
+	}
 	result=0
 	for entry in $SYNC_RECORDS; do
 		sync_one_record "$entry" || {

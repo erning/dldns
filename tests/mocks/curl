@@ -2,6 +2,7 @@
 
 method=GET
 data=
+url=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--request)
@@ -15,6 +16,7 @@ while [ "$#" -gt 0 ]; do
 		--config|--connect-timeout|--max-time|--write-out|--header)
 			shift
 			;;
+		https://*) url=$1 ;;
 	esac
 	shift
 done
@@ -85,6 +87,58 @@ case "$MOCK_SCENARIO:$method" in
 		;;
 	sync:POST)
 		body='{"id":101,"ttl_sec":300}'
+		;;
+	sync_clear4:GET)
+		body='{"data":[{"id":104,"name":"soda-v4","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
+	sync_clear4:DELETE)
+		body='{}'
+		;;
+	sync_ipv6_only:GET)
+		body='{"data":[{"id":105,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
+	sync_ipv6_only:DELETE)
+		body='{}'
+		;;
+	sync_ipv6_only:POST)
+		case "$data" in
+			*'"type":"AAAA"'*) ;;
+			*)
+				printf '%s\n' "request body is not for an AAAA record: $data" >&2
+				exit 2
+				;;
+		esac
+		body='{"id":102,"ttl_sec":300}'
+		;;
+	sync_ipv4_only:GET)
+		body='{"data":[{"id":106,"name":"soda","type":"AAAA","target":"240e::1","ttl_sec":300}],"pages":1}'
+		;;
+	sync_ipv4_only:POST)
+		case "$data" in
+			*'"type":"A"'*) ;;
+			*)
+				printf '%s\n' "request body is not for an A record: $data" >&2
+				exit 2
+				;;
+		esac
+		body='{"id":103,"ttl_sec":300}'
+		;;
+	sync_ipv4_only:DELETE)
+		body='{}'
+		;;
+	sync_pages:GET)
+		case "$url" in
+			*'page=1')
+				body='{"data":[{"id":107,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300},{"id":108,"name":"soda","type":"AAAA","target":"240e:b8f:9b00:8a22::1","ttl_sec":300}],"pages":2}'
+				;;
+			*'page=2')
+				body='{"data":[{"id":109,"name":"soda","type":"AAAA","target":"240e:b8f:9b00:8a22::2","ttl_sec":300}],"pages":2}'
+				;;
+			*)
+				printf '%s\n' "unexpected pagination URL: $url" >&2
+				exit 2
+				;;
+		esac
 		;;
 	sync_unchanged:GET)
 		body='{"data":[{"id":111,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'

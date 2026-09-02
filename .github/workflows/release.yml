@@ -23,6 +23,7 @@ jobs:
             tests/test-dldns-sync.sh \
             tests/test-dldns-update.sh \
             tests/mocks/curl \
+            tests/mocks/dig \
             tests/mocks/functions.sh \
             tests/mocks/notify \
             tests/mocks/ubus

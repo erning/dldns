@@ -18,5 +18,8 @@ case "$2:$3" in
 	network.interface.pppoe2_6:status)
 		printf '%s\n' '{"up":true,"proto":"dhcpv6","l3_device":"pppoe-pppoe2","ipv4-address":[],"ipv6-address":[{"address":"240e:b8f:9b00:8a22::1"},{"address":"240e:b8f:9b00:8a22::2"}]}'
 		;;
+	network.interface.pppoe3:status)
+		printf '%s\n' '{"up":true,"proto":"pppoe","l3_device":"pppoe-pppoe3","ipv4-address":[{"address":"116.237.37.233"}],"ipv6-address":[]}'
+		;;
 	*) exit 1 ;;
 esac

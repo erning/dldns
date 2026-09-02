@@ -18,9 +18,9 @@
 | `ip --format json` | 以上依赖及 `/usr/share/libubox/jshn.sh` |
 | `ip --external` | 以上依赖及 `curl` |
 | `update` | `curl`、`jsonfilter` |
-| `sync` | `ubus`、`curl`、`jsonfilter`、`/lib/functions.sh` |
+| `sync` | `ubus`、`curl`、`jsonfilter`、`/lib/functions.sh`；DNS 预检可选用 `dig` |
 
-脚本还会使用 OpenWrt 基础系统提供的 `awk`、`sed`、`tail` 和 `tr` 等工具。
+脚本还会使用 OpenWrt 基础系统提供的 `awk`、`sed`、`sort`、`tail` 和 `tr` 等工具。未安装 `dig` 时，`sync` 会输出警告、跳过 DNS 预检并直接查询 Linode API。
 
 ## 安装
 
@@ -90,9 +90,12 @@ dldns update --domain-id 123 --token-file /root/linode.token \
 ```uci
 config dldns 'main'
         option domain_id '12345'
+        option domain 'example.com'
         option token '@/root/linode.token'
         option ttl '300'
         option notify '/usr/libexec/dldns-notify'
+        list nameserver '192.0.2.53'
+        list nameserver '2001:db8::53'
         list interface 'pppoe1'
         list interface 'pppoe2'
         list record 'soda 4 6'
@@ -105,9 +108,11 @@ config dldns 'main'
 | 字段 | 说明 |
 | --- | --- |
 | `domain_id` | Linode 域名 ID，必填 |
+| `domain` | DNS 区域名称，用于将相对记录名组成完整域名，必填 |
 | `token` | API 令牌；以 `@` 开头时，其余内容是绝对文件路径 |
 | `ttl` | 记录 TTL，默认 300 秒 |
 | `notify` | 可选的通知钩子绝对路径，必须可执行 |
+| `nameserver` | 可重复；DNS 预检使用的服务器；未配置时使用本机默认解析器 |
 | `interface` | 可重复；需要读取的 OpenWrt 网络接口 |
 | `record` | 可重复；格式为 `RECORD 4`、`RECORD 6` 或 `RECORD 4 6` |
 
@@ -123,10 +128,11 @@ chmod 600 /root/linode.token
 ```sh
 dldns sync
 dldns sync --verbose
+dldns sync --force-api --verbose
 dldns sync --verbose pppoe1 pppoe2
 ```
 
-命令行接口优先于 UCI 中的 `list interface`。两者都没有配置时，脚本自动发现全部 PPPoE 接口。
+命令行接口优先于 UCI 中的 `list interface`。两者都没有配置时，脚本自动发现全部 PPPoE 接口。`--force-api` 会跳过 DNS 预检，但仍然只修改与期望状态不同的 Linode 记录。
 
 ### 同步语义
 
@@ -136,9 +142,13 @@ dldns sync --verbose pppoe1 pppoe2
 - `list record 'host 4'` 同步 A 记录，并清空同名 AAAA 记录。
 - `list record 'host 6'` 同步 AAAA 记录，并清空同名 A 记录。
 
-这是精确状态同步，不是只增不删的更新。脚本还会删除同名 CNAME 和多余的重复记录。正式运行前，可先执行 `dldns ip` 检查地址发现结果。`dldns sync --verbose` 会显示同步目标和 API 请求，但仍会真实执行变更，不是预演模式。
+这是精确状态同步，不是只增不删的更新。脚本还会删除同名 CNAME 和多余的重复记录。正式运行前，可先执行 `dldns ip` 检查地址发现结果。`dldns sync --verbose` 会显示接口、地址、DNS 预检、同步计划和 API 请求，但仍会真实执行变更，不是预演模式。
 
-脚本仅接受公网 IPv4 地址和 `2000::/3` 范围内的 IPv6 地址参与同步。若某个已配置地址族没有发现可用地址，同步会失败，不会把该地址族误清空。
+普通同步会先通过 `dig` 按顺序向每个 `list nameserver` 查询 A、AAAA 和 CNAME；未配置 `nameserver` 时使用本机默认解析器。只要任意一台 DNS 服务器成功返回所有配置记录的期望地址集合且没有 CNAME，脚本就会跳过 Linode API。某台服务器的结果不匹配、查询失败或无法可靠解析时，脚本会继续检查下一台；没有任何服务器完全匹配时才查询 Linode API。DNS 预检不比较 TTL，也无法发现 Linode 中被 DNS 响应合并的重复记录；可定期使用 `--force-api` 执行完整核对。
+
+需要访问 API 时，`sync` 会一次读取该域名的全部记录；超过 500 条时按分页读取，而不是为每个配置记录分别查询。API 状态已经正确时不会执行修改。
+
+脚本仅接受公网 IPv4 地址和 `2000::/3` 范围内的 IPv6 地址参与同步。接口地址发现成功但某个地址族没有公网地址时，脚本会将该地址族同步为空，即删除对应的 A 或 AAAA 记录，并继续同步其他地址族。若接口状态读取失败、接口关闭或发生其他地址发现错误，脚本会在 DNS 预检和 Linode API 查询前退出，不会修改 DNS 记录。
 
 ### 通知钩子
 
@@ -157,7 +167,7 @@ dldns sync --verbose pppoe1 pppoe2
 ```sh
 shellcheck -s dash \
     dldns tests/test-dldns-*.sh \
-    tests/mocks/curl tests/mocks/functions.sh \
+    tests/mocks/curl tests/mocks/dig tests/mocks/functions.sh \
     tests/mocks/notify tests/mocks/ubus
 tests/test-dldns-ip.sh
 tests/test-dldns-update.sh

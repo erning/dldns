@@ -13,6 +13,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 export DLDNS_UBUS="$MOCK_DIR/ubus"
 export DLDNS_JSONFILTER="$MOCK_DIR/jsonfilter"
 export DLDNS_CURL="$MOCK_DIR/curl"
+export DLDNS_DIG="$MOCK_DIR/dig"
 export DLDNS_UCI_FUNCTIONS_LIB="$MOCK_DIR/functions.sh"
 export DLDNS_LINODE_API_URL=https://mock.invalid/v4
 
@@ -21,13 +22,18 @@ failures=0
 reset_config()
 {
 	MOCK_CONFIG_DOMAIN_ID=123
+	MOCK_CONFIG_DOMAIN=example.com
 	MOCK_CONFIG_TOKEN=mock-token
 	MOCK_CONFIG_TTL=300
 	MOCK_CONFIG_NOTIFY=
 	MOCK_CONFIG_INTERFACES=
+	MOCK_CONFIG_NAMESERVERS=
 	MOCK_CONFIG_RECORDS='soda 4 6'
-	export MOCK_CONFIG_DOMAIN_ID MOCK_CONFIG_TOKEN MOCK_CONFIG_TTL
-	export MOCK_CONFIG_NOTIFY MOCK_CONFIG_INTERFACES MOCK_CONFIG_RECORDS
+	MOCK_DIG_SCENARIO=mismatch
+	DLDNS_DIG=$MOCK_DIR/dig
+	export MOCK_CONFIG_DOMAIN_ID MOCK_CONFIG_DOMAIN MOCK_CONFIG_TOKEN MOCK_CONFIG_TTL
+	export MOCK_CONFIG_NOTIFY MOCK_CONFIG_INTERFACES MOCK_CONFIG_NAMESERVERS MOCK_CONFIG_RECORDS
+	export MOCK_DIG_SCENARIO DLDNS_DIG
 }
 
 run_case()
@@ -37,9 +43,11 @@ run_case()
 	scenario=$3
 	shift 3
 	MOCK_CURL_LOG=$TMP_ROOT/$name.curl
+	MOCK_DIG_LOG=$TMP_ROOT/$name.dig
 	: >"$MOCK_CURL_LOG"
+	: >"$MOCK_DIG_LOG"
 	MOCK_SCENARIO=$scenario
-	export MOCK_CURL_LOG MOCK_SCENARIO
+	export MOCK_CURL_LOG MOCK_DIG_LOG MOCK_SCENARIO
 	if output=$("$SCRIPT" sync "$@" 2>&1); then
 		status=0
 	else
@@ -81,6 +89,24 @@ expect_methods()
 	fi
 }
 
+expect_dns_output()
+{
+	needle=$1
+	if ! grep -F -- "$needle" "$MOCK_DIG_LOG" >/dev/null; then
+		printf 'not ok - DNS query missing: %s\n' "$needle"
+		failures=$((failures + 1))
+	fi
+}
+
+expect_no_dns_queries()
+{
+	if [ -s "$MOCK_DIG_LOG" ]; then
+		printf 'not ok - unexpected DNS queries:\n'
+		cat "$MOCK_DIG_LOG"
+		failures=$((failures + 1))
+	fi
+}
+
 reset_config
 MOCK_CONFIG_INTERFACES='pppoe1|pppoe2'
 MOCK_CONFIG_RECORDS='soda 4 6|soda-v4 4|soda-v6 6'
@@ -91,7 +117,7 @@ expect_output 'public IPv4 set: 116.237.37.232'
 expect_output 'soda-v4 AAAA: clear'
 expect_output 'summary: changes=8 status=0'
 expect_no_output mock-token
-expect_methods 'GET POST POST POST POST GET POST GET POST POST POST'
+expect_methods 'GET POST POST POST POST POST POST POST POST'
 
 reset_config
 MOCK_CONFIG_RECORDS='soda-v6 6'
@@ -109,10 +135,104 @@ expect_output 'interfaces: pppoe2'
 expect_methods 'GET POST POST POST'
 
 reset_config
+MOCK_DIG_SCENARIO=match_pppoe2
+export MOCK_DIG_SCENARIO
+run_case system_dns_match_skips_api 0 sync --verbose pppoe2
+expect_output 'DNS system soda.example.com. A: match'
+expect_output 'DNS preflight matched; skipping Linode API'
+expect_methods ''
+expect_dns_output 'system soda.example.com. A'
+expect_dns_output 'system soda.example.com. AAAA'
+expect_dns_output 'system soda.example.com. CNAME'
+
+reset_config
+MOCK_CONFIG_NAMESERVERS='192.0.2.53|resolver.example'
+MOCK_DIG_SCENARIO=match_pppoe2
+export MOCK_CONFIG_NAMESERVERS MOCK_DIG_SCENARIO
+run_case configured_nameservers_match 0 sync --verbose pppoe2
+expect_output 'DNS 192.0.2.53 soda.example.com. A: match'
+expect_output 'DNS preflight matched via 192.0.2.53'
+expect_methods ''
+expect_dns_output '192.0.2.53 soda.example.com. A'
+expect_dns_output '192.0.2.53 soda.example.com. CNAME'
+
+reset_config
+MOCK_CONFIG_NAMESERVERS='192.0.2.53|resolver.example'
+MOCK_DIG_SCENARIO=match_second
+export MOCK_CONFIG_NAMESERVERS MOCK_DIG_SCENARIO
+run_case any_nameserver_match_skips_api 0 sync --verbose pppoe2
+expect_output 'DNS preflight did not match via 192.0.2.53'
+expect_output 'DNS preflight matched via resolver.example'
+expect_output 'DNS preflight matched; skipping Linode API'
+expect_methods ''
+expect_dns_output '192.0.2.53 soda.example.com. A'
+expect_dns_output 'resolver.example soda.example.com. CNAME'
+
+reset_config
+MOCK_CONFIG_RECORDS='soda 4'
+MOCK_DIG_SCENARIO=error
+export MOCK_CONFIG_RECORDS MOCK_DIG_SCENARIO
+run_case dns_error_falls_back_to_api 0 sync_unchanged --verbose pppoe2
+expect_output 'DNS system soda.example.com. A: unavailable (command-failed)'
+expect_output 'DNS preflight did not match; querying Linode API'
+expect_methods 'GET'
+
+reset_config
+MOCK_CONFIG_RECORDS='soda 4'
+DLDNS_DIG=$TMP_ROOT/missing-dig
+export MOCK_CONFIG_RECORDS DLDNS_DIG
+run_case missing_dig_warns_and_skips_preflight 0 sync_unchanged pppoe2
+expect_output 'warning: DNS preflight skipped: dig command not found'
+expect_methods 'GET'
+expect_no_dns_queries
+
+reset_config
+MOCK_CONFIG_RECORDS='soda 4'
+MOCK_DIG_SCENARIO=match_pppoe2
+export MOCK_CONFIG_RECORDS MOCK_DIG_SCENARIO
+run_case force_api_skips_dns 0 sync_unchanged --force-api --verbose pppoe2
+expect_output 'DNS preflight skipped: --force-api'
+expect_methods 'GET'
+expect_no_dns_queries
+
+reset_config
+MOCK_DIG_SCENARIO=match_pppoe2
+export MOCK_DIG_SCENARIO
+run_case paginated_api_snapshot 0 sync_pages --force-api --verbose pppoe2
+expect_output 'summary: changes=0 status=0'
+expect_methods 'GET GET'
+expect_no_dns_queries
+
+reset_config
 MOCK_CONFIG_RECORDS='soda-v4 4'
 export MOCK_CONFIG_RECORDS
-run_case missing_public_ipv4 1 sync pppoe1
-expect_output 'no public IPv4 address was found'
+run_case no_public_ipv4_clears_a 0 sync_clear4 --verbose pppoe1
+expect_output 'soda-v4 A: clear'
+expect_output 'deleted       A'
+expect_output 'summary: changes=1 status=0'
+expect_methods 'GET DELETE'
+
+reset_config
+MOCK_CONFIG_RECORDS='soda 4 6'
+export MOCK_CONFIG_RECORDS
+run_case no_public_ipv4_clears_a_and_syncs_aaaa 0 sync_ipv6_only --verbose pppoe1
+expect_output 'soda A: clear'
+expect_output 'created       AAAA'
+expect_output 'summary: changes=2 status=0'
+expect_methods 'GET DELETE POST'
+
+reset_config
+MOCK_CONFIG_RECORDS='soda 4 6'
+export MOCK_CONFIG_RECORDS
+run_case no_public_ipv6_clears_aaaa_and_syncs_a 0 sync_ipv4_only --verbose pppoe3
+expect_output 'soda AAAA: clear'
+expect_output 'created       A'
+expect_output 'summary: changes=2 status=0'
+expect_methods 'GET POST DELETE'
+
+reset_config
+run_case address_discovery_error_makes_no_api_requests 1 sync missing
+expect_output 'interface not found: missing'
 expect_methods ''
 
 reset_config
@@ -165,6 +285,13 @@ MOCK_CONFIG_TTL=0
 export MOCK_CONFIG_TTL
 run_case invalid_ttl 2 sync
 expect_output 'must be a positive integer'
+expect_methods ''
+
+reset_config
+MOCK_CONFIG_DOMAIN=
+export MOCK_CONFIG_DOMAIN
+run_case missing_domain 2 sync
+expect_output 'option domain in dldns.main must be a valid DNS name'
 expect_methods ''
 
 reset_config
