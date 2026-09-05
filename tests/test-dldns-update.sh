@@ -74,6 +74,14 @@ run_case update 0 update -4 116.237.37.232 soda.p
 expect_output updated
 expect_methods 'GET PUT'
 
+run_case reserve_later_target 0 multi6 -6 240e::2 -6 240e::1 soda.p
+expect_methods 'GET PUT'
+expect_output '240e::9 -> 240e::2'
+
+run_case reuse_duplicate_after_reserving_target 0 reserve_duplicate -4 116.237.37.2 -4 116.237.37.1 soda.p
+expect_methods 'GET PUT'
+expect_output '116.237.37.1 -> 116.237.37.2'
+
 run_case multiple_ipv6 0 multi6 -6 240e::1 --ipv6 240e::2 soda.p
 expect_output '240e::1'
 expect_output '240e::9 -> 240e::2'

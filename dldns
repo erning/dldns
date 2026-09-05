@@ -977,26 +977,39 @@ $1"
 
 reconcile_record_type()
 {
-	local type targets ids target exact_ids target_ids kept_id id old_target body response_id
+	local type targets ids target exact_ids target_ids kept_id id old_target body response_id assignments
 	type=$1
 	targets=$2
 	ids=$(record_ids_by_type "$type")
 	USED_IDS=
+	assignments=
 
+	# Reserve one existing record per desired target before reusing any IDs.
 	for target in $targets; do
 		exact_ids=$(exact_record_ids "$type" "$target")
 		kept_id=$(first_unused_id "$exact_ids") || kept_id=
+		if [ -z "$kept_id" ]; then
+			target_ids=$(record_ids_by_type_target "$type" "$target")
+			kept_id=$(first_unused_id "$target_ids") || kept_id=
+		fi
 		if [ -n "$kept_id" ]; then
 			mark_id_used "$kept_id"
+			assignments="$assignments
+$target	$kept_id"
+		fi
+	done
+
+	for target in $targets; do
+		kept_id=$(printf '%s\n' "$assignments" |
+			awk -F '\t' -v target="$target" '$1 == target { print $2; exit }')
+		if [ -n "$kept_id" ] && [ "$(record_field_by_id "$kept_id" ttl_sec)" -eq "$UPDATE_TTL" ]; then
 			emit_update_change unchanged "$type" "$kept_id" "$target" "$target" ""
 			continue
 		fi
 
-		target_ids=$(record_ids_by_type_target "$type" "$target")
-		kept_id=$(first_unused_id "$target_ids") || kept_id=
 		[ -n "$kept_id" ] || kept_id=$(first_unused_id "$ids") || kept_id=
 		if [ -n "$kept_id" ]; then
-			mark_id_used "$kept_id"
+			id_is_used "$kept_id" || mark_id_used "$kept_id"
 			old_target=$(record_field_by_id "$kept_id" target)
 			body=$(printf '{"name":"%s","target":"%s","ttl_sec":%s}' "$UPDATE_RECORD" "$target" "$UPDATE_TTL")
 			linode_request PUT "/domains/$UPDATE_DOMAIN_ID/records/$kept_id" "$body" "" ||
