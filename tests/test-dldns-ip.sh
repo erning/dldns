@@ -5,6 +5,7 @@ set -u
 TEST_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 PROJECT_DIR=$(dirname "$TEST_DIR")
 SCRIPT=$PROJECT_DIR/dldns
+SCRIPT_SHELL=${DLDNS_TEST_SHELL:-sh}
 MOCK_DIR=$TEST_DIR/mocks
 
 export DLDNS_UBUS="$MOCK_DIR/ubus"
@@ -17,7 +18,7 @@ run_case()
 	name=$1
 	expected_status=$2
 	shift 2
-	if output=$("$SCRIPT" ip "$@" 2>&1); then
+	if output=$("$SCRIPT_SHELL" "$SCRIPT" ip "$@" 2>&1); then
 		status=0
 	else
 		status=$?

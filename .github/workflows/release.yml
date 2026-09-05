@@ -6,33 +6,20 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/check.yml
+
   release:
+    needs: checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Lint Shell scripts
-        run: |
-          shellcheck -s dash \
-            dldns \
-            tests/test-dldns-ip.sh \
-            tests/test-dldns-sync.sh \
-            tests/test-dldns-update.sh \
-            tests/mocks/curl \
-            tests/mocks/dig \
-            tests/mocks/functions.sh \
-            tests/mocks/notify \
-            tests/mocks/ubus
-
-      - name: Test
-        run: |
-          tests/test-dldns-ip.sh
-          tests/test-dldns-update.sh
-          tests/test-dldns-sync.sh
 
       - name: Generate checksum
         run: sha256sum dldns > dldns.sha256

@@ -5,6 +5,7 @@ set -u
 TEST_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 PROJECT_DIR=$(dirname "$TEST_DIR")
 SCRIPT=$PROJECT_DIR/dldns
+SCRIPT_SHELL=${DLDNS_TEST_SHELL:-sh}
 MOCK_DIR=$TEST_DIR/mocks
 TMP_ROOT=${TMPDIR:-/tmp}/dldns-test.$$
 mkdir "$TMP_ROOT" || exit 1
@@ -32,7 +33,7 @@ run_case()
 	MOCK_SCENARIO=$scenario
 	export MOCK_SCENARIO
 
-	if output=$("$SCRIPT" update --domain-id 123 --token-file "$TOKEN_FILE" "$@" 2>&1); then
+	if output=$("$SCRIPT_SHELL" "$SCRIPT" update --domain-id 123 --token-file "$TOKEN_FILE" "$@" 2>&1); then
 		status=0
 	else
 		status=$?

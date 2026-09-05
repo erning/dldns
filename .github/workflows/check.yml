@@ -1,0 +1,55 @@
+name: Check
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Shell scripts
+        run: |
+          shellcheck -s dash \
+            dldns tests/test-dldns-*.sh \
+            tests/mocks/curl tests/mocks/dig tests/mocks/functions.sh \
+            tests/mocks/notify tests/mocks/ubus
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [sh, ash]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install BusyBox
+        if: matrix.shell == 'ash'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y busybox
+
+      - name: Test
+        env:
+          DLDNS_TEST_SHELL: ${{ matrix.shell }}
+        run: |
+          if [ "$DLDNS_TEST_SHELL" = ash ]; then
+            mkdir -p "$RUNNER_TEMP/dldns-shell"
+            ln -s "$(command -v busybox)" "$RUNNER_TEMP/dldns-shell/ash"
+            export PATH="$RUNNER_TEMP/dldns-shell:$PATH"
+          fi
+          test -x dldns
+          for test_script in tests/test-dldns-*.sh; do
+            "$DLDNS_TEST_SHELL" "$test_script"
+          done
