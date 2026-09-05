@@ -14,6 +14,10 @@ fi
 
 case "${MOCK_UBUS_SCENARIO:-}:$2" in
 	canonical_parent_error:network.interface.pppoe2) exit 7 ;;
+	ipv6_scope:network.interface.pppoe3)
+		printf '%s\n' '{"up":true,"ipv4-address":[{"address":"116.237.37.233"}],"ipv6-address":[{"address":"2::1"},{"address":"20::1"},{"address":"200::1"},{"address":"3::1"},{"address":"1fff::1"},{"address":"2000::1"},{"address":"3FFF::1"},{"address":"4000::1"},{"address":"fe80::1"},{"address":"::1"}]}'
+		exit 0
+		;;
 	equivalent_ipv6:network.interface.pppoe2_6)
 		printf '%s\n' '{"up":true,"ipv6-address":[{"address":"240e:b8f:9b00:8a22::1"},{"address":"240E:0B8F:9B00:8A22:0:0:0:1"},{"address":"240e:b8f:9b00:8a22::2"}]}'
 		exit 0

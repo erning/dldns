@@ -231,6 +231,13 @@ run_case unrelated_apex_and_inherited_ttl_are_valid 0 apex_record --force-api pp
 expect_methods GET
 
 reset_config
+MOCK_UBUS_SCENARIO=ipv6_scope
+MOCK_CONFIG_RECORDS='soda 6'
+export MOCK_UBUS_SCENARIO MOCK_CONFIG_RECORDS
+run_case only_global_ipv6_prefix_is_synchronized 0 ipv6_scope --force-api pppoe3
+expect_methods 'GET POST POST'
+
+reset_config
 MOCK_CONFIG_RECORDS='soda-v4 4'
 export MOCK_CONFIG_RECORDS
 run_case no_public_ipv4_clears_a 0 sync_clear4 --verbose pppoe1

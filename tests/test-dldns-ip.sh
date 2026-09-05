@@ -79,6 +79,12 @@ expect_output 'unsupported output format: yaml'
 run_case missing_interface 1 missing
 expect_output 'interface not found: missing'
 
+export MOCK_UBUS_SCENARIO=ipv6_scope
+run_case public_ipv6_prefix_boundaries 0 -6 --format value pppoe3
+expect_exact_output '2000::1
+3FFF::1'
+unset MOCK_UBUS_SCENARIO
+
 if [ "$failures" -ne 0 ]; then
 	printf '%s test assertion(s) failed\n' "$failures" >&2
 	exit 1

@@ -34,6 +34,14 @@ if [ -n "${MOCK_EXPECT_TTL:-}" ] && [ "$method" != GET ]; then
 fi
 
 case "$MOCK_SCENARIO:$method" in
+	ipv6_scope:GET) body='{"data":[],"pages":1}' ;;
+	ipv6_scope:POST)
+		case "$data" in
+			'{"type":"AAAA","name":"soda","target":"2000::1","ttl_sec":300}'|'{"type":"AAAA","name":"soda","target":"3fff::1","ttl_sec":300}') ;;
+			*) exit 2 ;;
+		esac
+		body='{"id":231}'
+		;;
 	malformed:GET) body='not-json' ;;
 	missing_data:GET) body='{"pages":1}' ;;
 	invalid_data:GET) body='{"data":{},"pages":1}' ;;
