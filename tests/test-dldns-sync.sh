@@ -213,6 +213,23 @@ run_case equivalent_discovered_and_api_ipv6 0 sync_equivalent6 --force-api --ver
 expect_methods GET
 expect_output 'summary: changes=0 status=0'
 
+for invalid_response in malformed missing_data invalid_data missing_pages invalid_pages incomplete_record invalid_record; do
+	reset_config
+	run_case "$invalid_response" 1 "$invalid_response" --force-api pppoe2
+	expect_methods GET
+	expect_no_dns_queries
+done
+
+reset_config
+run_case invalid_later_page_does_not_mutate_records 1 bad_second_page --force-api pppoe2
+expect_methods 'GET GET'
+
+reset_config
+MOCK_CONFIG_RECORDS='soda 4'
+export MOCK_CONFIG_RECORDS
+run_case unrelated_apex_and_inherited_ttl_are_valid 0 apex_record --force-api pppoe2
+expect_methods GET
+
 reset_config
 MOCK_CONFIG_RECORDS='soda-v4 4'
 export MOCK_CONFIG_RECORDS

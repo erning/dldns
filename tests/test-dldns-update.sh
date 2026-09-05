@@ -160,6 +160,11 @@ run_case clear_ipv6_conflict 2 unchanged --clear-ipv6 -6 240e::1 soda.p
 expect_output 'cannot be combined'
 expect_methods ''
 
+for invalid_response in malformed missing_data invalid_data missing_pages invalid_pages incomplete_record invalid_record; do
+	run_case "$invalid_response" 1 "$invalid_response" -4 116.237.37.232 soda.p
+	expect_methods GET
+done
+
 if [ "$failures" -ne 0 ]; then
 	printf '%s test assertion(s) failed\n' "$failures" >&2
 	exit 1

@@ -34,6 +34,29 @@ if [ -n "${MOCK_EXPECT_TTL:-}" ] && [ "$method" != GET ]; then
 fi
 
 case "$MOCK_SCENARIO:$method" in
+	malformed:GET) body='not-json' ;;
+	missing_data:GET) body='{"pages":1}' ;;
+	invalid_data:GET) body='{"data":{},"pages":1}' ;;
+	missing_pages:GET) body='{"data":[]}' ;;
+	invalid_pages:GET) body='{"data":[],"pages":0}' ;;
+	incomplete_record:GET)
+		body='{"data":[{"id":221,"type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
+	invalid_record:GET)
+		body='{"data":[{"id":"bad-id","name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
+	bad_second_page:GET)
+		case "$url" in
+			*'page=1')
+				body='{"data":[{"id":222,"name":"soda","type":"CNAME","target":"old.example","ttl_sec":300}],"pages":2}'
+				;;
+			*'page=2') body='{"data":{},"pages":2}' ;;
+			*) exit 2 ;;
+		esac
+		;;
+	apex_record:GET)
+		body='{"data":[{"id":223,"name":"","type":"A","target":"116.237.37.232","ttl_sec":0},{"id":224,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
 	unchanged:GET)
 		body='{"data":[{"id":11,"name":"soda.p","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
 		;;

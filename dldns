@@ -872,25 +872,56 @@ emit_update_change()
 	esac
 }
 
+append_cached_record()
+{
+	local document type id name target ttl target_key
+	document=$1
+	type=$(json_values "$document" '@.type') || return 1
+	case "$type" in A|AAAA|CNAME) ;; *) return 0 ;; esac
+	id=$(json_values "$document" '@.id') || return 1
+	positive_integer "$id" || return 1
+	name=$(json_values "$document" '@.name') || return 1
+	[ -z "$name" ] || valid_record_name "$name" || return 1
+	target=$(json_values "$document" '@.target') || return 1
+	ttl=$(json_values "$document" '@.ttl_sec') || return 1
+	case "$ttl" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$ttl" -ge 0 ] 2>/dev/null || return 1
+	case "$type" in
+		A) valid_ipv4 "$target" || return 1 ;;
+		AAAA) valid_ipv6 "$target" || return 1 ;;
+		CNAME) valid_record_name "${target%.}" || return 1 ;;
+	esac
+	target_key=$(record_target_key "$type" "$target") || return 1
+	RECORD_CACHE="$RECORD_CACHE
+$id	$name	$type	$target	$ttl	$target_key"
+}
+
 append_record_cache()
 {
-	local document type ids id name target ttl target_key
+	local document records entries entry
 	document=$1
-	for type in A AAAA CNAME; do
-		ids=$(json_values "$document" "@.data[@.type=\"$type\"].id")
-		for id in $ids; do
-			name=$(json_values "$document" "@.data[@.id=$id].name") || name=
-			target=$(json_values "$document" "@.data[@.id=$id].target") || return 1
-			ttl=$(json_values "$document" "@.data[@.id=$id].ttl_sec") || return 1
-			[ -n "$target" ] && [ -n "$ttl" ] || {
-				error "Linode returned an incomplete DNS record: $id"
-				return 1
-			}
-			target_key=$(record_target_key "$type" "$target") || return 1
-			RECORD_CACHE="$RECORD_CACHE
-$id	$name	$type	$target	$ttl	$target_key"
-		done
-	done
+	if [ "$(json_type "$document" '@.data')" != array ] ||
+		[ "$(json_type "$document" '@.pages')" != int ]; then
+		error 'Linode returned an invalid records response'
+		return 1
+	fi
+	RECORD_PAGE_COUNT=$(json_values "$document" '@.pages') || return 1
+	positive_integer "$RECORD_PAGE_COUNT" || {
+		error 'Linode returned an invalid records page count'
+		return 1
+	}
+	records=$(json_values "$document" '@.data') || return 1
+	[ "$(printf '%s' "$records" | tr -d ' \t\r\n')" != '[]' ] || return 0
+	entries=$(json_values "$records" '@[*]') || return 1
+	[ -n "$entries" ] || return 1
+	while IFS= read -r entry; do
+		append_cached_record "$entry" || {
+			error 'Linode returned an incomplete or invalid DNS record'
+			return 1
+		}
+	done <<EOF
+$entries
+EOF
 }
 
 record_ids_by_type()
@@ -1128,13 +1159,12 @@ $2"
 	linode_request GET "/domains/$UPDATE_DOMAIN_ID/records?page_size=500" "" "$filter" ||
 		return 1
 	RECORDS_JSON=$LINODE_BODY
-	pages=$(json_values "$RECORDS_JSON" '@.pages')
-	[ -z "$pages" ] || [ "$pages" -eq 1 ] || {
-		error "Linode returned $pages pages for record name $UPDATE_RECORD"
-		return 1
-	}
 	RECORD_CACHE=
 	append_record_cache "$RECORDS_JSON" || return 1
+	[ "$RECORD_PAGE_COUNT" -eq 1 ] || {
+		error "Linode returned $RECORD_PAGE_COUNT pages for record name $UPDATE_RECORD"
+		return 1
+	}
 
 	CNAME_IDS=$(record_ids_by_type CNAME)
 	if { [ -n "$UPDATE_TARGET_IPV4" ] || [ -n "$UPDATE_TARGET_IPV6" ]; } && [ -n "$CNAME_IDS" ]; then
@@ -1523,12 +1553,10 @@ fetch_sync_record_cache()
 			return 1
 		append_record_cache "$LINODE_BODY" || return 1
 		if [ "$page" -eq 1 ]; then
-			pages=$(json_values "$LINODE_BODY" '@.pages')
-			[ -n "$pages" ] || pages=1
-			positive_integer "$pages" || {
-				error 'Linode returned an invalid records page count'
-				return 1
-			}
+			pages=$RECORD_PAGE_COUNT
+		elif [ "$RECORD_PAGE_COUNT" -ne "$pages" ]; then
+			error 'Linode records page count changed during pagination'
+			return 1
 		fi
 		page=$((page + 1))
 	done
