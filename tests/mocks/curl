@@ -22,6 +22,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 printf '%s\n' "$method" >>"$MOCK_CURL_LOG"
+if [ -n "${MOCK_CURL_REQUEST_LOG:-}" ]; then
+	printf '%s\t%s\t%s\n' "$method" "$url" "$data" >>"$MOCK_CURL_REQUEST_LOG"
+fi
 
 if [ -n "${MOCK_EXPECT_TTL:-}" ] && [ "$method" != GET ]; then
 	case "$data" in
@@ -35,6 +38,17 @@ fi
 
 http_code=200
 case "$MOCK_SCENARIO:$method" in
+	transport_error:GET) exit 7 ;;
+	partial_failure:GET) body='{"data":[],"pages":1}' ;;
+	partial_failure:POST)
+		case "$data" in
+			*'"type":"A"'*) body='{"id":241}' ;;
+			*)
+				body='{"errors":[{"reason":"Simulated write failure"}]}'
+				http_code=503
+				;;
+		esac
+		;;
 	api_error:GET)
 		body='{"errors":[{"reason":"Invalid domain ID"},{"reason":"Permission denied"}]}'
 		http_code=403

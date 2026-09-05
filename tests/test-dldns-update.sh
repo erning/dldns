@@ -25,8 +25,10 @@ run_case()
 	scenario=$3
 	shift 3
 	MOCK_CURL_LOG=$TMP_ROOT/$name.curl
+	MOCK_CURL_REQUEST_LOG=$TMP_ROOT/$name.requests
 	: >"$MOCK_CURL_LOG"
-	export MOCK_CURL_LOG
+	: >"$MOCK_CURL_REQUEST_LOG"
+	export MOCK_CURL_LOG MOCK_CURL_REQUEST_LOG
 	MOCK_SCENARIO=$scenario
 	export MOCK_SCENARIO
 
@@ -62,6 +64,12 @@ expect_methods()
 	fi
 }
 
+expect_requests()
+{
+	printf '%s\n' "$1" | python3 "$TEST_DIR/assert-requests.py" "$MOCK_CURL_REQUEST_LOG" ||
+		failures=$((failures + 1))
+}
+
 run_case unchanged 0 unchanged -4 116.237.37.232 soda.p
 expect_output unchanged
 expect_methods GET
@@ -69,14 +77,26 @@ expect_methods GET
 run_case create 0 create -4 116.237.37.232 soda.p
 expect_output created
 expect_methods 'GET POST'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["POST", "/domains/123/records", {"type":"A","name":"soda.p","target":"116.237.37.232","ttl_sec":300}]
+]'
 
 run_case update 0 update -4 116.237.37.232 soda.p
 expect_output updated
 expect_methods 'GET PUT'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["PUT", "/domains/123/records/31", {"name":"soda.p","target":"116.237.37.232","ttl_sec":300}]
+]'
 
 run_case reserve_later_target 0 multi6 -6 240e::2 -6 240e::1 soda.p
 expect_methods 'GET PUT'
 expect_output '240e::9 -> 240e::2'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["PUT", "/domains/123/records/62", {"name":"soda.p","target":"240e::2","ttl_sec":300}]
+]'
 
 run_case reuse_duplicate_after_reserving_target 0 reserve_duplicate -4 116.237.37.2 -4 116.237.37.1 soda.p
 expect_methods 'GET PUT'
@@ -90,11 +110,20 @@ expect_methods 'GET PUT'
 run_case delete_surplus_ipv6 0 surplus6 -6 240e::1 -6 240e::2 soda.p
 expect_output 'surplus record'
 expect_methods 'GET DELETE'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["DELETE", "/domains/123/records/73", null]
+]'
 
 run_case replace_cname 0 cname -4 116.237.37.232 soda.p
 expect_output 'conflicting CNAME'
 expect_output created
 expect_methods 'GET DELETE POST'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["DELETE", "/domains/123/records/81", null],
+  ["POST", "/domains/123/records", {"type":"A","name":"soda.p","target":"116.237.37.232","ttl_sec":300}]
+]'
 
 run_case update_ttl 0 ttl --ttl 300 -4 116.237.37.232 soda.p
 expect_output updated
@@ -105,6 +134,10 @@ export MOCK_EXPECT_TTL
 run_case update_short_ttl 0 ttl --ttl 30 -4 116.237.37.232 soda.p
 expect_output updated
 expect_methods 'GET PUT'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["PUT", "/domains/123/records/91", {"name":"soda.p","target":"116.237.37.232","ttl_sec":30}]
+]'
 MOCK_EXPECT_TTL=
 export MOCK_EXPECT_TTL
 
@@ -126,6 +159,10 @@ expect_methods 'GET POST'
 
 run_case equivalent_ipv6_input 0 create -6 240e::1 -6 240E:0000:0:0:0:0:0:1 soda.p
 expect_methods 'GET POST'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["POST", "/domains/123/records", {"type":"AAAA","name":"soda.p","target":"240e::1","ttl_sec":300}]
+]'
 
 run_case equivalent_ipv6_cache 0 equivalent6 -6 240e::1 soda.p
 expect_output unchanged
@@ -148,6 +185,11 @@ run_case clear_ipv6 0 multi6 --clear-ipv6 soda.p
 expect_output '240e::1'
 expect_output '240e::9'
 expect_methods 'GET DELETE DELETE'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500", null],
+  ["DELETE", "/domains/123/records/61", null],
+  ["DELETE", "/domains/123/records/62", null]
+]'
 
 run_case clear_does_not_delete_cname 0 cname --clear-ipv4 soda.p
 expect_methods GET
@@ -172,6 +214,10 @@ expect_output 'Linode API returned HTTP 403: Invalid domain ID,Permission denied
 run_case missing_api_error_reason 1 api_error_without_reason -4 116.237.37.232 soda.p
 expect_methods GET
 expect_output 'Linode API returned HTTP 503: unknown API error'
+
+run_case transport_failure 1 transport_error -4 116.237.37.232 soda.p
+expect_methods GET
+expect_output 'Linode API request failed: GET'
 
 if [ "$failures" -ne 0 ]; then
 	printf '%s test assertion(s) failed\n' "$failures" >&2

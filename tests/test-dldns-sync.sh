@@ -46,11 +46,13 @@ run_case()
 	scenario=$3
 	shift 3
 	MOCK_CURL_LOG=$TMP_ROOT/$name.curl
+	MOCK_CURL_REQUEST_LOG=$TMP_ROOT/$name.requests
 	MOCK_DIG_LOG=$TMP_ROOT/$name.dig
 	: >"$MOCK_CURL_LOG"
+	: >"$MOCK_CURL_REQUEST_LOG"
 	: >"$MOCK_DIG_LOG"
 	MOCK_SCENARIO=$scenario
-	export MOCK_CURL_LOG MOCK_DIG_LOG MOCK_SCENARIO
+	export MOCK_CURL_LOG MOCK_CURL_REQUEST_LOG MOCK_DIG_LOG MOCK_SCENARIO
 	if output=$("$SCRIPT" sync "$@" 2>&1); then
 		status=0
 	else
@@ -90,6 +92,12 @@ expect_methods()
 		printf 'not ok - methods: got "%s", expected "%s"\n' "$actual" "$expected"
 		failures=$((failures + 1))
 	fi
+}
+
+expect_requests()
+{
+	printf '%s\n' "$1" | python3 "$TEST_DIR/assert-requests.py" "$MOCK_CURL_REQUEST_LOG" ||
+		failures=$((failures + 1))
 }
 
 expect_dns_output()
@@ -205,6 +213,10 @@ run_case paginated_api_snapshot 0 sync_pages --force-api --verbose pppoe2
 expect_output 'summary: changes=0 status=0'
 expect_methods 'GET GET'
 expect_no_dns_queries
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["GET", "/domains/123/records?page_size=500&page=2", null]
+]'
 
 reset_config
 MOCK_UBUS_SCENARIO=equivalent_ipv6
@@ -368,12 +380,35 @@ MOCK_CONFIG_RECORDS='soda-v4 4'
 export MOCK_NOTIFY_LOG MOCK_CONFIG_NOTIFY MOCK_CONFIG_RECORDS
 run_case notification 0 sync pppoe2
 expect_methods 'GET POST'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["POST", "/domains/123/records", {"type":"A","name":"soda-v4","target":"116.237.37.232","ttl_sec":300}]
+]'
 if [ ! -f "$MOCK_NOTIFY_LOG" ]; then
 	printf 'not ok - notification hook was not called\n'
 	failures=$((failures + 1))
 else
 	grep -F 'status=success changes=1' "$MOCK_NOTIFY_LOG" >/dev/null || failures=$((failures + 1))
 	grep -F 'created A soda-v4 - 116.237.37.232' "$MOCK_NOTIFY_LOG" >/dev/null || failures=$((failures + 1))
+fi
+
+reset_config
+MOCK_NOTIFY_LOG=$TMP_ROOT/failed-notify.log
+MOCK_CONFIG_NOTIFY=$MOCK_DIR/notify
+export MOCK_NOTIFY_LOG MOCK_CONFIG_NOTIFY
+run_case partial_failure_notifies_completed_changes 1 partial_failure --force-api pppoe2
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["POST", "/domains/123/records", {"type":"A","name":"soda","target":"116.237.37.232","ttl_sec":300}],
+  ["POST", "/domains/123/records", {"type":"AAAA","name":"soda","target":"240e:b8f:9b00:8a22::1","ttl_sec":300}]
+]'
+expect_output 'Simulated write failure'
+if [ ! -f "$MOCK_NOTIFY_LOG" ]; then
+	printf 'not ok - partial failure did not call notification hook\n'
+	failures=$((failures + 1))
+else
+	grep -Fx 'status=failed changes=1' "$MOCK_NOTIFY_LOG" >/dev/null || failures=$((failures + 1))
+	grep -Fx 'created A soda - 116.237.37.232' "$MOCK_NOTIFY_LOG" >/dev/null || failures=$((failures + 1))
 fi
 
 reset_config
@@ -398,6 +433,11 @@ expect_output 'deleted'
 expect_output 'AAAA'
 expect_no_output 'unchanged'
 expect_methods 'GET DELETE DELETE'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["DELETE", "/domains/123/records/122", null],
+  ["DELETE", "/domains/123/records/123", null]
+]'
 
 if [ "$failures" -ne 0 ]; then
 	printf '%s test assertion(s) failed\n' "$failures" >&2
