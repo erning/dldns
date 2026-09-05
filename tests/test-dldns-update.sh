@@ -124,6 +124,13 @@ run_case duplicate_input 0 create -4 116.237.37.232 --ipv4 116.237.37.232 soda.p
 expect_output created
 expect_methods 'GET POST'
 
+run_case equivalent_ipv6_input 0 create -6 240e::1 -6 240E:0000:0:0:0:0:0:1 soda.p
+expect_methods 'GET POST'
+
+run_case equivalent_ipv6_cache 0 equivalent6 -6 240e::1 soda.p
+expect_output unchanged
+expect_methods 'GET DELETE'
+
 run_case invalid_ipv4 2 unchanged -4 999.1.2.3 soda.p
 expect_output 'invalid IPv4 address'
 expect_methods ''

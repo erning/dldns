@@ -874,7 +874,7 @@ emit_update_change()
 
 append_record_cache()
 {
-	local document type ids id name target ttl
+	local document type ids id name target ttl target_key
 	document=$1
 	for type in A AAAA CNAME; do
 		ids=$(json_values "$document" "@.data[@.type=\"$type\"].id")
@@ -886,8 +886,9 @@ append_record_cache()
 				error "Linode returned an incomplete DNS record: $id"
 				return 1
 			}
+			target_key=$(record_target_key "$type" "$target") || return 1
 			RECORD_CACHE="$RECORD_CACHE
-$id	$name	$type	$target	$ttl"
+$id	$name	$type	$target	$ttl	$target_key"
 		done
 	done
 }
@@ -901,9 +902,11 @@ record_ids_by_type()
 
 record_ids_by_type_target()
 {
+	local target_key
+	target_key=$(record_target_key "$1" "$2") || return 1
 	printf '%s\n' "$RECORD_CACHE" |
-		awk -F '\t' -v name="$UPDATE_RECORD" -v type="$1" -v target="$2" \
-			'$2 == name && $3 == type && $4 == target { print $1 }'
+		awk -F '\t' -v name="$UPDATE_RECORD" -v type="$1" -v target="$target_key" \
+			'$2 == name && $3 == type && $6 == target { print $1 }'
 }
 
 record_field_by_id()
@@ -923,9 +926,11 @@ record_field_by_id()
 
 exact_record_ids()
 {
+	local target_key
+	target_key=$(record_target_key "$1" "$2") || return 1
 	printf '%s\n' "$RECORD_CACHE" |
-		awk -F '\t' -v name="$UPDATE_RECORD" -v type="$1" -v target="$2" -v ttl="$UPDATE_TTL" \
-			'$2 == name && $3 == type && $4 == target && $5 == ttl { print $1 }'
+		awk -F '\t' -v name="$UPDATE_RECORD" -v type="$1" -v target="$target_key" -v ttl="$UPDATE_TTL" \
+			'$2 == name && $3 == type && $6 == target && $5 == ttl { print $1 }'
 }
 
 delete_record()
@@ -1104,7 +1109,7 @@ $2"
 	[ -n "$UPDATE_TOKEN_FILE" ] || usage_error '--token-file is required'
 	valid_record_name "$UPDATE_RECORD" || usage_error 'RECORD contains unsupported characters'
 	UPDATE_TARGET_IPV4=$(printf '%s\n' "$UPDATE_TARGET_IPV4" | normalize_lines)
-	UPDATE_TARGET_IPV6=$(printf '%s\n' "$UPDATE_TARGET_IPV6" | tr 'A-F' 'a-f' | normalize_lines)
+	UPDATE_TARGET_IPV6=$(printf '%s\n' "$UPDATE_TARGET_IPV6" | unique_ipv6_targets)
 	[ "$UPDATE_IPV4_SELECTED" -eq 1 ] || [ "$UPDATE_IPV6_SELECTED" -eq 1 ] ||
 		usage_error 'at least one address or clear option is required'
 	if [ "$UPDATE_CLEAR_IPV4" -eq 1 ] && [ -n "$UPDATE_TARGET_IPV4" ]; then
@@ -1274,7 +1279,7 @@ $IPV6"
 		fi
 	done
 	SYNC_IPV4=$(printf '%s\n' "$SYNC_IPV4" | normalize_lines)
-	SYNC_IPV6=$(printf '%s\n' "$SYNC_IPV6" | tr 'A-F' 'a-f' | normalize_lines)
+	SYNC_IPV6=$(printf '%s\n' "$SYNC_IPV6" | unique_ipv6_targets)
 	sync_verbose "public IPv4 set: $(join_lines "$SYNC_IPV4")"
 	sync_verbose "public IPv6 set: $(join_lines "$SYNC_IPV6")"
 }
@@ -1312,6 +1317,25 @@ canonical_ipv6()
 			}
 			print result
 		}'
+}
+
+record_target_key()
+{
+	case "$1" in
+		AAAA) canonical_ipv6 "$2" ;;
+		*) printf '%s\n' "$2" ;;
+	esac
+}
+
+unique_ipv6_targets()
+{
+	local address key
+	while IFS= read -r address; do
+		[ -n "$address" ] || continue
+		address=$(printf '%s' "$address" | tr 'A-F' 'a-f')
+		key=$(canonical_ipv6 "$address") || return 1
+		printf '%s\t%s\n' "$key" "$address"
+	done | awk -F '\t' '!seen[$1]++ { print $2 }'
 }
 
 normalize_address_targets()

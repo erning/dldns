@@ -68,6 +68,16 @@ case "$MOCK_SCENARIO:$method" in
 		[ "$data" = '{"name":"soda.p","target":"116.237.37.2","ttl_sec":300}' ] || exit 2
 		body='{"id":202}'
 		;;
+	equivalent6:GET)
+		body='{"data":[{"id":211,"name":"soda.p","type":"AAAA","target":"240E:0000:0:0:0:0:0:1","ttl_sec":300},{"id":212,"name":"soda.p","type":"AAAA","target":"240e::1","ttl_sec":300}],"pages":1}'
+		;;
+	equivalent6:DELETE)
+		[ "$url" = 'https://mock.invalid/v4/domains/123/records/212' ] || exit 2
+		body='{}'
+		;;
+	sync_equivalent6:GET)
+		body='{"data":[{"id":213,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300},{"id":214,"name":"soda","type":"AAAA","target":"240E:0B8F:9B00:8A22:0:0:0:1","ttl_sec":300},{"id":215,"name":"soda","type":"AAAA","target":"240e:b8f:9b00:8a22:0:0:0:2","ttl_sec":300}],"pages":1}'
+		;;
 	multi6:DELETE)
 		body='{}'
 		;;

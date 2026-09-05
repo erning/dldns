@@ -207,6 +207,13 @@ expect_methods 'GET GET'
 expect_no_dns_queries
 
 reset_config
+MOCK_UBUS_SCENARIO=equivalent_ipv6
+export MOCK_UBUS_SCENARIO
+run_case equivalent_discovered_and_api_ipv6 0 sync_equivalent6 --force-api --verbose pppoe2
+expect_methods GET
+expect_output 'summary: changes=0 status=0'
+
+reset_config
 MOCK_CONFIG_RECORDS='soda-v4 4'
 export MOCK_CONFIG_RECORDS
 run_case no_public_ipv4_clears_a 0 sync_clear4 --verbose pppoe1
