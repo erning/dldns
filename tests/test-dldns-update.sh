@@ -165,6 +165,14 @@ for invalid_response in malformed missing_data invalid_data missing_pages invali
 	expect_methods GET
 done
 
+run_case api_error_reasons 1 api_error -4 116.237.37.232 soda.p
+expect_methods GET
+expect_output 'Linode API returned HTTP 403: Invalid domain ID,Permission denied'
+
+run_case missing_api_error_reason 1 api_error_without_reason -4 116.237.37.232 soda.p
+expect_methods GET
+expect_output 'Linode API returned HTTP 503: unknown API error'
+
 if [ "$failures" -ne 0 ]; then
 	printf '%s test assertion(s) failed\n' "$failures" >&2
 	exit 1

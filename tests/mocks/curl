@@ -33,7 +33,16 @@ if [ -n "${MOCK_EXPECT_TTL:-}" ] && [ "$method" != GET ]; then
 	esac
 fi
 
+http_code=200
 case "$MOCK_SCENARIO:$method" in
+	api_error:GET)
+		body='{"errors":[{"reason":"Invalid domain ID"},{"reason":"Permission denied"}]}'
+		http_code=403
+		;;
+	api_error_without_reason:GET)
+		body='{}'
+		http_code=503
+		;;
 	ipv6_scope:GET) body='{"data":[],"pages":1}' ;;
 	ipv6_scope:POST)
 		case "$data" in
@@ -206,4 +215,4 @@ case "$MOCK_SCENARIO:$method" in
 		;;
 esac
 
-printf '%s\n%s\n' "$body" 200
+printf '%s\n%s\n' "$body" "$http_code"

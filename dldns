@@ -811,7 +811,8 @@ linode_request()
 		2??) return 0 ;;
 	esac
 
-	reasons=$(json_values "$LINODE_BODY" '@.errors[*].reason' | join_lines)
+	reasons=$(json_values "$LINODE_BODY" '@.errors[*].reason')
+	reasons=$(join_lines "$reasons")
 	[ -n "$reasons" ] || reasons='unknown API error'
 	error "Linode API returned HTTP $LINODE_HTTP_CODE: $reasons"
 	return 1
