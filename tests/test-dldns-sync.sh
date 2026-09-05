@@ -30,10 +30,13 @@ reset_config()
 	MOCK_CONFIG_NAMESERVERS=
 	MOCK_CONFIG_RECORDS='soda 4 6'
 	MOCK_DIG_SCENARIO=mismatch
+	MOCK_UBUS_SCENARIO=
+	MOCK_JSONFILTER_FAIL_EXPRESSION=
 	DLDNS_DIG=$MOCK_DIR/dig
 	export MOCK_CONFIG_DOMAIN_ID MOCK_CONFIG_DOMAIN MOCK_CONFIG_TOKEN MOCK_CONFIG_TTL
 	export MOCK_CONFIG_NOTIFY MOCK_CONFIG_INTERFACES MOCK_CONFIG_NAMESERVERS MOCK_CONFIG_RECORDS
 	export MOCK_DIG_SCENARIO DLDNS_DIG
+	export MOCK_UBUS_SCENARIO MOCK_JSONFILTER_FAIL_EXPRESSION
 }
 
 run_case()
@@ -232,8 +235,41 @@ expect_methods 'GET POST DELETE'
 
 reset_config
 run_case address_discovery_error_makes_no_api_requests 1 sync missing
-expect_output 'interface not found: missing'
+expect_output 'unable to read interface addresses: missing'
 expect_methods ''
+expect_no_dns_queries
+
+for discovery_error in child_error child_down parent_down malformed_child list_error invalid_address incomplete_address; do
+	reset_config
+	MOCK_UBUS_SCENARIO=$discovery_error
+	export MOCK_UBUS_SCENARIO
+	run_case "$discovery_error" 1 sync pppoe2
+	expect_methods ''
+	expect_no_dns_queries
+done
+
+reset_config
+export MOCK_JSONFILTER_FAIL_EXPRESSION='@["ipv4-address"]'
+run_case address_parser_error 1 sync pppoe2
+expect_methods ''
+expect_no_dns_queries
+
+reset_config
+MOCK_UBUS_SCENARIO=canonical_parent_error
+export MOCK_UBUS_SCENARIO
+run_case canonical_parent_failure_does_not_use_partial_interfaces 1 sync pppoe1 pppoe2_6
+expect_methods ''
+expect_no_dns_queries
+
+reset_config
+export MOCK_JSONFILTER_FAIL_EXPRESSION='@.proto'
+run_case canonical_parent_parser_failure 1 sync pppoe1 pppoe2_6
+expect_methods ''
+expect_no_dns_queries
+
+reset_config
+run_case standalone_ipv6_interface 0 sync --force-api standalone_6
+expect_methods 'GET POST'
 
 reset_config
 MOCK_CONFIG_RECORDS='soda 5'

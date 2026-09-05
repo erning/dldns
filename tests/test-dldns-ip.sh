@@ -62,6 +62,14 @@ expect_exact_output '116.237.37.232'
 run_case child_interface_is_canonicalized 0 -6 --format value pppoe1_6
 expect_exact_output '2409:8a1e:8f01:2a3c::1'
 
+run_case standalone_child_interface 0 -6 --format value standalone_6
+expect_exact_output '240e::1'
+
+export MOCK_UBUS_SCENARIO=canonical_parent_error
+run_case child_parent_read_failure 1 pppoe1 pppoe2_6
+expect_output 'unable to resolve interface names'
+unset MOCK_UBUS_SCENARIO
+
 run_case value_requires_one_interface 2 -4 --format value
 expect_output 'value format requires exactly one interface'
 

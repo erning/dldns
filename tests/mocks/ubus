@@ -1,6 +1,37 @@
 #!/bin/sh
 
+if [ "$1" = list ]; then
+	[ "${MOCK_UBUS_SCENARIO:-}" != list_error ] || exit 7
+	case "${2:-}" in
+		'') printf '%s\n' network.interface network.interface.pppoe1 network.interface.pppoe1_6 network.interface.pppoe2 network.interface.pppoe2_6 network.interface.pppoe3 network.interface.standalone_6 ;;
+		network.interface.pppoe1_6|network.interface.pppoe2_6) printf '%s\n' "$2" ;;
+		*) exit 4 ;;
+	esac
+	exit 0
+fi
+
 [ "$1" = call ] || exit 1
+
+case "${MOCK_UBUS_SCENARIO:-}:$2" in
+	canonical_parent_error:network.interface.pppoe2) exit 7 ;;
+	child_error:network.interface.pppoe2_6) exit 7 ;;
+	child_down:network.interface.pppoe2_6|parent_down:network.interface.pppoe2)
+		printf '%s\n' '{"up":false}'
+		exit 0
+		;;
+	malformed_child:network.interface.pppoe2_6)
+		printf '%s\n' 'not-json'
+		exit 0
+		;;
+	invalid_address:network.interface.pppoe2)
+		printf '%s\n' '{"up":true,"ipv4-address":[{"address":"999.1.2.3"}],"ipv6-address":[]}'
+		exit 0
+		;;
+	incomplete_address:network.interface.pppoe2)
+		printf '%s\n' '{"up":true,"ipv4-address":[{"address":"116.237.37.232"},{}],"ipv6-address":[]}'
+		exit 0
+		;;
+esac
 
 case "$2:$3" in
 	network.interface:dump)
@@ -20,6 +51,9 @@ case "$2:$3" in
 		;;
 	network.interface.pppoe3:status)
 		printf '%s\n' '{"up":true,"proto":"pppoe","l3_device":"pppoe-pppoe3","ipv4-address":[{"address":"116.237.37.233"}],"ipv6-address":[]}'
+		;;
+	network.interface.standalone_6:status)
+		printf '%s\n' '{"up":true,"proto":"dhcpv6","ipv4-address":[],"ipv6-address":[{"address":"240e::1"}]}'
 		;;
 	*) exit 1 ;;
 esac

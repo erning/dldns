@@ -174,6 +174,36 @@ json_values()
 		"$JSONFILTER_CMD" -e "$expression" 2>/dev/null
 }
 
+json_type()
+{
+	printf '%s' "$1" | "$JSONFILTER_CMD" -t "$2" 2>/dev/null
+}
+
+interface_address_values()
+{
+	local document family addresses entries entry values address
+	document=$1
+	family=$2
+	addresses=$(json_values "$document" "@[\"ipv$family-address\"]") || return 1
+	[ "$(json_type "$addresses" '@')" = array ] || return 1
+	[ "$(printf '%s' "$addresses" | tr -d ' \t\r\n')" != '[]' ] || return 0
+	entries=$(json_values "$addresses" '@[*]') || return 1
+	[ -n "$entries" ] || return 1
+	values=
+	while IFS= read -r entry; do
+		address=$(json_values "$entry" '@.address') || return 1
+		case "$family" in
+			4) valid_ipv4 "$address" || return 1 ;;
+			6) valid_ipv6 "$address" || return 1 ;;
+		esac
+		values="$values
+$address"
+	done <<EOF
+$entries
+EOF
+	printf '%s\n' "$values" | normalize_lines
+}
+
 normalize_lines()
 {
 	awk 'NF && !seen[$0]++ { print }'
@@ -339,15 +369,24 @@ filter_public_ipv6()
 	done
 }
 
+find_interface_object()
+{
+	local objects
+	objects=$("$UBUS_CMD" list 2>/dev/null) || return 1
+	printf '%s\n' "$objects" | awk -v name="network.interface.$1" '$0 == name'
+}
+
 canonical_interface_name()
 {
-	local requested base status proto
+	local requested base object status proto
 	requested=$1
 	case "$requested" in
 		*_6)
 			base=$(printf '%s' "$requested" | sed 's/_6$//')
-			if status=$("$UBUS_CMD" call "network.interface.$base" status 2>/dev/null); then
-				proto=$(json_values "$status" '@.proto')
+			object=$(find_interface_object "$base") || return 1
+			if [ -n "$object" ]; then
+				status=$("$UBUS_CMD" call "$object" status 2>/dev/null) || return 1
+				proto=$(json_values "$status" '@.proto') || return 1
 				if [ "$proto" = pppoe ]; then
 					printf '%s\n' "$base"
 					return
@@ -358,27 +397,57 @@ canonical_interface_name()
 	printf '%s\n' "$requested"
 }
 
+canonical_interface_names()
+{
+	local names requested
+	names=$(
+		while IFS= read -r requested; do
+			[ -n "$requested" ] || continue
+			canonical_interface_name "$requested" || exit 1
+		done
+	) || return 1
+	printf '%s\n' "$names" | normalize_lines
+}
+
 load_interface_snapshot()
 {
-	local interface child_interface parent_ipv6 child_ipv6 child_status
+	local interface child_interface parent_ipv6 child_ipv6 child_status child_object child_up
 	interface=$1
 
 	STATUS=$("$UBUS_CMD" call "network.interface.$interface" status 2>/dev/null) ||
 		return 1
 
-	UP=$(json_values "$STATUS" '@.up')
+	UP=$(json_values "$STATUS" '@.up') || return 1
+	case "$UP" in true|false) ;; *) return 1 ;; esac
 	DEVICE=$(json_values "$STATUS" '@.l3_device')
 	[ "$UP" = true ] && STATE=up || STATE=down
+	IPV4=
+	IPV6=
+	IPV4_SCOPE=none
+	[ "$STATE" = up ] || return 0
 
-	IPV4=$(json_values "$STATUS" '@["ipv4-address"][*].address' |
-		normalize_lines)
+	IPV4=$(interface_address_values "$STATUS" 4) || return 1
+	IPV4=$(printf '%s\n' "$IPV4" | normalize_lines)
 	IPV4_SCOPE=$(ipv4_scope_for_list "$IPV4")
 
-	parent_ipv6=$(json_values "$STATUS" '@["ipv6-address"][*].address')
+	parent_ipv6=$(interface_address_values "$STATUS" 6) || return 1
 	child_ipv6=
 	child_interface=$interface"_6"
-	if child_status=$("$UBUS_CMD" call "network.interface.$child_interface" status 2>/dev/null); then
-		child_ipv6=$(json_values "$child_status" '@["ipv6-address"][*].address')
+	child_object=$(find_interface_object "$child_interface") || return 1
+	if [ -n "$child_object" ]; then
+		[ "$child_object" = "network.interface.$child_interface" ] || return 1
+		child_status=$("$UBUS_CMD" call "$child_object" status 2>/dev/null) || return 1
+		child_up=$(json_values "$child_status" '@.up') || return 1
+		case "$child_up" in
+			true) child_ipv6=$(interface_address_values "$child_status" 6) || return 1 ;;
+			false)
+				if [ "${SYNC_MODE:-0}" -eq 1 ]; then
+					error "interface is down: $child_interface"
+					return 1
+				fi
+				;;
+			*) return 1 ;;
+		esac
 	fi
 	IPV6=$(
 		{
@@ -1147,12 +1216,11 @@ select_sync_interfaces()
 	fi
 
 	SYNC_INTERFACES=$(
-		printf '%s\n' "$candidates" |
-		while IFS= read -r requested; do
-			[ -n "$requested" ] && canonical_interface_name "$requested"
-		done |
-		normalize_lines
-	)
+		printf '%s\n' "$candidates" | canonical_interface_names
+	) || {
+		error 'unable to resolve interface names'
+		return 1
+	}
 	[ -n "$SYNC_INTERFACES" ] || {
 		error 'no matching network interfaces found'
 		return 1
@@ -1175,7 +1243,7 @@ collect_sync_addresses()
 	SYNC_IPV6=
 	for interface in $SYNC_INTERFACES; do
 		load_interface_snapshot "$interface" || {
-			error "interface not found: $interface"
+			error "unable to read interface addresses: $interface"
 			return 1
 		}
 		[ "$STATE" = up ] || {
@@ -1672,13 +1740,11 @@ $1"
 		)
 	else
 		INTERFACES=$(
-			printf '%s\n' "$REQUESTED_INTERFACES" |
-			while IFS= read -r requested; do
-				[ -n "$requested" ] &&
-					canonical_interface_name "$requested"
-			done |
-			normalize_lines
-		)
+			printf '%s\n' "$REQUESTED_INTERFACES" | canonical_interface_names
+		) || {
+			error 'unable to resolve interface names'
+			return 1
+		}
 	fi
 
 	[ -n "$INTERFACES" ] || {
