@@ -4,7 +4,7 @@
 # No command changes UCI, netifd, routes, cron, or local router state.
 
 PROGRAM_NAME=$(basename "$0")
-PROGRAM_VERSION=0.5.0
+PROGRAM_VERSION=0.6.0
 
 UBUS_CMD=$DLDNS_UBUS
 [ -n "$UBUS_CMD" ] || UBUS_CMD=ubus
