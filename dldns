@@ -138,6 +138,9 @@ Linode records configured in /etc/config/dldns. Command-line interfaces take
 precedence over configured interfaces. If neither is present, all interfaces
 using proto=pppoe are discovered.
 
+Down interfaces contribute no addresses. If all selected interfaces are down,
+the configured A/AAAA records are cleared. Unreadable interface state aborts sync.
+
 Options:
       --force-api         Skip the DNS preflight and query the Linode API
   -v, --verbose           Show DNS checks, interfaces, addresses, plans, API requests, and unchanged records
@@ -442,8 +445,7 @@ load_interface_snapshot()
 			true) child_ipv6=$(interface_address_values "$child_status" 6) || return 1 ;;
 			false)
 				if [ "${SYNC_MODE:-0}" -eq 1 ]; then
-					error "interface is down: $child_interface"
-					return 1
+					sync_verbose "interface is down: $child_interface; skipping addresses"
 				fi
 				;;
 			*) return 1 ;;
@@ -1296,8 +1298,8 @@ collect_sync_addresses()
 			return 1
 		}
 		[ "$STATE" = up ] || {
-			error "interface is down: $interface"
-			return 1
+			sync_verbose "interface is down: $interface; skipping addresses"
+			continue
 		}
 		interface_ipv4=$(printf '%s\n' "$IPV4" | public_ipv4_from_list)
 		SYNC_IPV4="$SYNC_IPV4

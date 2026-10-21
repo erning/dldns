@@ -22,9 +22,25 @@ case "${MOCK_UBUS_SCENARIO:-}:$2" in
 		printf '%s\n' '{"up":true,"ipv6-address":[{"address":"240e:b8f:9b00:8a22::1"},{"address":"240E:0B8F:9B00:8A22:0:0:0:1"},{"address":"240e:b8f:9b00:8a22::2"}]}'
 		exit 0
 		;;
-	child_error:network.interface.pppoe2_6) exit 7 ;;
-	child_down:network.interface.pppoe2_6|parent_down:network.interface.pppoe2)
+	child_error:network.interface.pppoe2_6|parent_error:network.interface.pppoe2) exit 7 ;;
+	all_down:network.interface.pppoe1|all_down:network.interface.pppoe2|all_down:network.interface.pppoe3)
 		printf '%s\n' '{"up":false}'
+		exit 0
+		;;
+	parent_down:network.interface.pppoe2)
+		printf '%s\n' '{"up":false,"ipv4-address":[{"address":"116.237.37.232"}],"ipv6-address":[{"address":"240e:b8f:9b00:8a22::1"}]}'
+		exit 0
+		;;
+	child_down:network.interface.pppoe2_6|child_down_parent_ipv6:network.interface.pppoe2_6)
+		printf '%s\n' '{"up":false,"ipv6-address":[{"address":"240e:b8f:9b00:8a22::2"}]}'
+		exit 0
+		;;
+	child_down_parent_ipv6:network.interface.pppoe2)
+		printf '%s\n' '{"up":true,"ipv4-address":[{"address":"116.237.37.232"}],"ipv6-address":[{"address":"240e:b8f:9b00:8a22::1"}]}'
+		exit 0
+		;;
+	parent_unknown:network.interface.pppoe2|child_unknown:network.interface.pppoe2_6)
+		printf '%s\n' '{"up":"unknown"}'
 		exit 0
 		;;
 	malformed_child:network.interface.pppoe2_6)

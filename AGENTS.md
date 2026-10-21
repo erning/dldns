@@ -69,6 +69,7 @@ Tests must use the dependency overrides (`DLDNS_UBUS`, `DLDNS_JSONFILTER`, `DLDN
 - When API access is needed, fetch the domain record list once or by pagination instead of once per configured name.
 - Remove same-name CNAME records before creating A/AAAA records and deduplicate all reconciled records.
 - Treat successful discovery with no public address for a family as an empty desired set and clear that family; make no DNS changes when address discovery fails.
+- Treat interfaces explicitly reported as down as contributing no addresses and continue with other interfaces. A down `_6` child must not discard its up parent's addresses. If all selected interfaces are down, clear the configured records' A/AAAA sets; unreadable or invalid interface state remains a discovery failure.
 
 ## Release
 

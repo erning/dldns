@@ -217,6 +217,12 @@ case "$MOCK_SCENARIO:$method" in
 	sync_unchanged:GET)
 		body='{"data":[{"id":111,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
 		;;
+	sync_existing_addresses:GET)
+		body='{"data":[{"id":251,"name":"soda","type":"A","target":"116.237.37.232","ttl_sec":300},{"id":252,"name":"soda","type":"AAAA","target":"240e:b8f:9b00:8a22::1","ttl_sec":300},{"id":253,"name":"soda","type":"AAAA","target":"240e:b8f:9b00:8a22::2","ttl_sec":300},{"id":254,"name":"soda","type":"A","target":"116.237.37.233","ttl_sec":300},{"id":255,"name":"other","type":"A","target":"116.237.37.232","ttl_sec":300}],"pages":1}'
+		;;
+	sync_existing_addresses:DELETE)
+		body='{}'
+		;;
 	sync_clear6:GET)
 		body='{"data":[{"id":121,"name":"soda-v4","type":"A","target":"116.237.37.232","ttl_sec":300},{"id":122,"name":"soda-v4","type":"AAAA","target":"240e::1","ttl_sec":300},{"id":123,"name":"soda-v4","type":"AAAA","target":"240e::2","ttl_sec":300}],"pages":1}'
 		;;

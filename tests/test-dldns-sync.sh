@@ -277,13 +277,78 @@ expect_output 'created       A'
 expect_output 'summary: changes=2 status=0'
 expect_methods 'GET POST DELETE'
 
+for interfaces in 'pppoe2|pppoe3' 'pppoe3|pppoe2'; do
+	reset_config
+	MOCK_UBUS_SCENARIO=parent_down
+	MOCK_CONFIG_INTERFACES=$interfaces
+	export MOCK_UBUS_SCENARIO MOCK_CONFIG_INTERFACES
+	run_case "down_interface_with_online_$interfaces" 0 sync_existing_addresses --verbose
+	expect_output 'interface is down: pppoe2; skipping addresses'
+	expect_output 'public IPv4 set: 116.237.37.233'
+	expect_output 'summary: changes=3 status=0'
+	expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["DELETE", "/domains/123/records/251", null],
+  ["DELETE", "/domains/123/records/252", null],
+  ["DELETE", "/domains/123/records/253", null]
+]'
+done
+
+reset_config
+MOCK_UBUS_SCENARIO=all_down
+MOCK_CONFIG_INTERFACES='pppoe1|pppoe2|pppoe3'
+export MOCK_UBUS_SCENARIO MOCK_CONFIG_INTERFACES
+run_case all_interfaces_down_clears_a_and_aaaa 0 sync_existing_addresses --verbose
+expect_output 'soda A: clear'
+expect_output 'soda AAAA: clear'
+expect_output 'summary: changes=4 status=0'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["DELETE", "/domains/123/records/251", null],
+  ["DELETE", "/domains/123/records/254", null],
+  ["DELETE", "/domains/123/records/252", null],
+  ["DELETE", "/domains/123/records/253", null]
+]'
+
+reset_config
+MOCK_UBUS_SCENARIO=child_down
+export MOCK_UBUS_SCENARIO
+run_case child_down_clears_aaaa_and_keeps_a 0 sync_existing_addresses --verbose pppoe2 pppoe3
+expect_output 'interface is down: pppoe2_6; skipping addresses'
+expect_output 'public IPv4 set: 116.237.37.232,116.237.37.233'
+expect_output 'summary: changes=2 status=0'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["DELETE", "/domains/123/records/252", null],
+  ["DELETE", "/domains/123/records/253", null]
+]'
+
+reset_config
+MOCK_UBUS_SCENARIO=child_down_parent_ipv6
+export MOCK_UBUS_SCENARIO
+run_case child_down_keeps_parent_ipv6 0 sync_existing_addresses --verbose pppoe2 pppoe3
+expect_output 'public IPv6 set: 240e:b8f:9b00:8a22::1'
+expect_output 'summary: changes=1 status=0'
+expect_requests '[
+  ["GET", "/domains/123/records?page_size=500&page=1", null],
+  ["DELETE", "/domains/123/records/253", null]
+]'
+
+reset_config
+MOCK_UBUS_SCENARIO=parent_down
+export MOCK_UBUS_SCENARIO
+run_case down_then_failed_discovery_does_not_clear_records 1 sync_existing_addresses pppoe2 missing
+expect_output 'unable to read interface addresses: missing'
+expect_methods ''
+expect_no_dns_queries
+
 reset_config
 run_case address_discovery_error_makes_no_api_requests 1 sync missing
 expect_output 'unable to read interface addresses: missing'
 expect_methods ''
 expect_no_dns_queries
 
-for discovery_error in child_error child_down parent_down malformed_child list_error invalid_address incomplete_address; do
+for discovery_error in parent_error child_error parent_unknown child_unknown malformed_child list_error invalid_address incomplete_address; do
 	reset_config
 	MOCK_UBUS_SCENARIO=$discovery_error
 	export MOCK_UBUS_SCENARIO
